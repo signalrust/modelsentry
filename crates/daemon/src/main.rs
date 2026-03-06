@@ -11,7 +11,11 @@ use std::sync::Arc;
 
 use clap::Parser;
 use modelsentry_common::config::AppConfig;
-use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
+use modelsentry_core::{
+    alert::AlertEngine,
+    drift::calculator::DriftCalculator,
+    provider::{anthropic::AnthropicProvider, openai::OpenAiProvider},
+};
 use modelsentry_daemon::{
     scheduler::{ProviderRegistry, Scheduler},
     server::{self, AppState},
@@ -93,7 +97,38 @@ async fn main() -> anyhow::Result<()> {
             .timeout(std::time::Duration::from_secs(10))
             .build()?,
     ));
-    let providers: ProviderRegistry = ProviderRegistry::new();
+    // ── Providers — load API keys from vault ─────────────────────────────
+    let mut providers: ProviderRegistry = ProviderRegistry::new();
+
+    // OpenAI
+    match vault.get_key("openai") {
+        Ok(Some(key)) => match OpenAiProvider::new(key, "gpt-4o") {
+            Ok(p) => {
+                providers.insert("openai".to_string(), Arc::new(p));
+                tracing::info!("provider registered: openai");
+            }
+            Err(e) => tracing::warn!("failed to initialise OpenAI provider: {e}"),
+        },
+        Ok(None) => tracing::debug!("no 'openai' key in vault — openai provider not registered"),
+        Err(e) => tracing::warn!("vault error reading 'openai' key: {e}"),
+    }
+
+    // Anthropic
+    match vault.get_key("anthropic") {
+        Ok(Some(key)) => match AnthropicProvider::new(key, "claude-3-7-sonnet-20250219") {
+            Ok(p) => {
+                providers.insert("anthropic".to_string(), Arc::new(p));
+                tracing::info!("provider registered: anthropic");
+            }
+            Err(e) => tracing::warn!("failed to initialise Anthropic provider: {e}"),
+        },
+        Ok(None) => {
+            tracing::debug!("no 'anthropic' key in vault — anthropic provider not registered");
+        }
+        Err(e) => tracing::warn!("vault error reading 'anthropic' key: {e}"),
+    }
+
+    tracing::info!(registered = providers.len(), "provider registry built");
 
     // ── Scheduler ──────────────────────────────────────────────────────────
     let scheduler = Scheduler::new(
