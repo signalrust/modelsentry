@@ -109,11 +109,17 @@ async fn trigger_probe_run(
         .ok_or_else(|| AppError(ModelSentryError::ProbeNotFound { id: id.clone() }))?;
 
     let provider_key = provider_key_for(&probe.provider);
-    let provider = state.providers.get(&provider_key).cloned().ok_or_else(|| {
-        AppError(ModelSentryError::Config {
-            message: format!("no provider registered for '{provider_key}'"),
-        })
-    })?;
+    let provider = state
+        .providers
+        .read()
+        .unwrap()
+        .get(&provider_key)
+        .cloned()
+        .ok_or_else(|| {
+            AppError(ModelSentryError::Config {
+                message: format!("no provider registered for '{provider_key}'"),
+            })
+        })?;
 
     let runner = ProbeRunner::new(provider);
     let concurrency = 4;
@@ -160,7 +166,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    use crate::{scheduler::ProviderRegistry, server::AppState};
+    use crate::{scheduler::new_registry, server::AppState};
     use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
     use modelsentry_store::AppStore;
 
@@ -182,7 +188,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            providers: Arc::new(ProviderRegistry::new()),
+            providers: Arc::new(new_registry()),
             calculator: Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
             alert_engine: Arc::new(AlertEngine::default()),
             config: Arc::new(make_config()),

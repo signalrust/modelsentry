@@ -14,10 +14,10 @@ use modelsentry_common::config::AppConfig;
 use modelsentry_core::{
     alert::AlertEngine,
     drift::calculator::DriftCalculator,
-    provider::{anthropic::AnthropicProvider, openai::OpenAiProvider},
+    provider::{anthropic::AnthropicProvider, ollama::OllamaProvider, openai::OpenAiProvider},
 };
 use modelsentry_daemon::{
-    scheduler::{ProviderRegistry, Scheduler},
+    scheduler::{Scheduler, new_registry},
     server::{self, AppState},
     vault::Vault,
 };
@@ -45,6 +45,7 @@ struct Cli {
     vault_passphrase: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ── Logging ────────────────────────────────────────────────────────────
@@ -98,13 +99,16 @@ async fn main() -> anyhow::Result<()> {
             .build()?,
     ));
     // ── Providers — load API keys from vault ─────────────────────────────
-    let mut providers: ProviderRegistry = ProviderRegistry::new();
+    let provider_map = new_registry();
 
     // OpenAI
     match vault.get_key("openai") {
         Ok(Some(key)) => match OpenAiProvider::new(key, "gpt-4o") {
             Ok(p) => {
-                providers.insert("openai".to_string(), Arc::new(p));
+                provider_map
+                    .write()
+                    .unwrap()
+                    .insert("openai".to_string(), Arc::new(p));
                 tracing::info!("provider registered: openai");
             }
             Err(e) => tracing::warn!("failed to initialise OpenAI provider: {e}"),
@@ -117,7 +121,10 @@ async fn main() -> anyhow::Result<()> {
     match vault.get_key("anthropic") {
         Ok(Some(key)) => match AnthropicProvider::new(key, "claude-3-7-sonnet-20250219") {
             Ok(p) => {
-                providers.insert("anthropic".to_string(), Arc::new(p));
+                provider_map
+                    .write()
+                    .unwrap()
+                    .insert("anthropic".to_string(), Arc::new(p));
                 tracing::info!("provider registered: anthropic");
             }
             Err(e) => tracing::warn!("failed to initialise Anthropic provider: {e}"),
@@ -128,12 +135,36 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!("vault error reading 'anthropic' key: {e}"),
     }
 
-    tracing::info!(registered = providers.len(), "provider registry built");
+    // Ollama (no API key — just needs base_url stored as the 'key' value)
+    // Convention: store the base URL as the vault value for provider id 'ollama'.
+    // Falls back to the default localhost URL if no entry exists.
+    {
+        let base_url = match vault.get_key("ollama") {
+            Ok(Some(key)) => key.expose().to_string(),
+            _ => "http://localhost:11434".to_string(),
+        };
+        match OllamaProvider::new("llama3", base_url.clone()) {
+            Ok(p) => {
+                provider_map
+                    .write()
+                    .unwrap()
+                    .insert(format!("ollama:{base_url}"), Arc::new(p));
+                tracing::info!(base_url = %base_url, "provider registered: ollama");
+            }
+            Err(e) => tracing::warn!("failed to initialise Ollama provider: {e}"),
+        }
+    }
+
+    let providers = Arc::new(provider_map);
+    tracing::info!(
+        registered = providers.read().unwrap().len(),
+        "provider registry built"
+    );
 
     // ── Scheduler ──────────────────────────────────────────────────────────
     let scheduler = Scheduler::new(
         Arc::clone(&store),
-        providers.clone(),
+        Arc::clone(&providers),
         DriftCalculator::new(
             config.alerts.drift_threshold_kl,
             config.alerts.drift_threshold_cos,
@@ -147,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         store,
         vault,
-        providers: Arc::new(providers),
+        providers,
         calculator,
         alert_engine,
         config: Arc::new(config.clone()),

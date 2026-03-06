@@ -169,7 +169,7 @@ mod tests {
     };
     use std::sync::Arc;
 
-    use crate::scheduler::ProviderRegistry;
+    use crate::scheduler::new_registry;
     use crate::server::AppState;
     use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
     use modelsentry_store::AppStore;
@@ -192,7 +192,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            providers: Arc::new(ProviderRegistry::new()),
+            providers: Arc::new(new_registry()),
             calculator: Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
             alert_engine: Arc::new(AlertEngine::default()),
             config: Arc::new(modelsentry_common::config::AppConfig {

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -24,13 +24,19 @@ use tokio::task::JoinSet;
 
 /// Maps a provider identifier (e.g. `"anthropic"`, `"openai"`) to a
 /// [`DynProvider`] implementation.
-pub type ProviderRegistry = HashMap<String, DynProvider>;
+pub type ProviderRegistry = RwLock<HashMap<String, DynProvider>>;
+
+/// Convenience constructor for an empty [`ProviderRegistry`].
+#[must_use]
+pub fn new_registry() -> ProviderRegistry {
+    RwLock::new(HashMap::new())
+}
 
 /// Tokio-based scheduler that fires [`ProbeRunner`] for each probe on its
 /// configured schedule and writes results back to the store.
 pub struct Scheduler {
     store: Arc<AppStore>,
-    providers: ProviderRegistry,
+    providers: Arc<ProviderRegistry>,
     calculator: DriftCalculator,
     alert_engine: AlertEngine,
 }
@@ -49,7 +55,7 @@ impl Scheduler {
     #[must_use]
     pub fn new(
         store: Arc<AppStore>,
-        providers: ProviderRegistry,
+        providers: Arc<ProviderRegistry>,
         calculator: DriftCalculator,
         alert_engine: AlertEngine,
     ) -> Self {
@@ -73,7 +79,7 @@ impl Scheduler {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
         let store = Arc::clone(&self.store);
-        let providers = Arc::new(self.providers);
+        let providers = Arc::clone(&self.providers);
         let calculator = Arc::new(self.calculator);
         let alert_engine = Arc::new(self.alert_engine);
 
@@ -140,7 +146,8 @@ async fn run_probe_loop(
         tokio::time::sleep(sleep_until_next_run(&probe.schedule)).await;
 
         let key = provider_key(&probe.provider);
-        let Some(provider) = providers.get(&key).cloned() else {
+        let provider = providers.read().ok().and_then(|g| g.get(&key).cloned());
+        let Some(provider) = provider else {
             tracing::error!(
                 probe_id = %probe.id,
                 "scheduler: no provider registered for '{key}' — skipping run",
@@ -328,11 +335,14 @@ mod tests {
     }
 
     fn make_scheduler(store: Arc<AppStore>, provider: Arc<dyn LlmProvider>) -> Scheduler {
-        let mut providers = ProviderRegistry::new();
-        providers.insert("anthropic".to_string(), provider);
+        let registry = Arc::new(new_registry());
+        registry
+            .write()
+            .unwrap()
+            .insert("anthropic".to_string(), provider);
         Scheduler::new(
             store,
-            providers,
+            registry,
             DriftCalculator::new(0.5, 0.5).unwrap(),
             AlertEngine::default(),
         )
@@ -405,7 +415,7 @@ mod tests {
         let (_dir, store) = open_store();
         let handle = Scheduler::new(
             store,
-            ProviderRegistry::new(),
+            Arc::new(new_registry()),
             DriftCalculator::new(1.0, 1.0).unwrap(),
             AlertEngine::default(),
         )

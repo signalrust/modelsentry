@@ -15,6 +15,7 @@ pub mod alerts;
 pub mod baselines;
 pub mod probes;
 pub mod runs;
+pub mod vault;
 
 /// Assemble all route groups under a shared `AppState`.
 pub fn router(state: AppState) -> Router {
@@ -23,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .merge(baselines::router())
         .merge(runs::router())
         .merge(alerts::router())
+        .merge(vault::router())
         .with_state(state)
 }
 
@@ -49,6 +51,9 @@ impl IntoResponse for AppError {
             }
             ModelSentryError::Config { .. } => {
                 (StatusCode::UNPROCESSABLE_ENTITY, self.0.to_string())
+            }
+            ModelSentryError::Vault { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string())
             }
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
