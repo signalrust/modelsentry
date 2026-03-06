@@ -824,6 +824,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tracing",
  "uuid",
  "wiremock",
 ]
@@ -833,11 +834,15 @@ name = "modelsentry-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
  "modelsentry-common",
  "modelsentry-core",
  "modelsentry-store",
+ "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

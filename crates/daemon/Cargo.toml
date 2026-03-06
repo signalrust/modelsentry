@@ -12,5 +12,12 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
+uuid.workspace = true
+
 [lints]
 workspace = true
