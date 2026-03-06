@@ -21,6 +21,9 @@ pub enum ModelSentryError {
     #[error("storage error: {0}")]
     Storage(#[from] redb::StorageError),
 
+    #[error("database error: {0}")]
+    Db(String),
+
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 

@@ -844,8 +844,14 @@ dependencies = [
 name = "modelsentry-store"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "modelsentry-common",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
