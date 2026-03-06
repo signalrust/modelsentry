@@ -1,0 +1,35 @@
+services:
+  daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile.daemon
+    ports:
+      - "7740:7740"
+    volumes:
+      - modelsentry_data:/data
+      - ./config/local.toml:/etc/modelsentry/config.toml:ro
+    environment:
+      MODELSENTRY_CONFIG: /etc/modelsentry/config.toml
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7740/api/probes"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  dashboard:
+    build:
+      context: web
+      dockerfile: Dockerfile
+    ports:
+      - "5173:3000"
+    environment:
+      # Proxy API calls to the daemon container
+      PUBLIC_API_BASE: http://daemon:7740
+    depends_on:
+      daemon:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  modelsentry_data:

@@ -1,99 +1,236 @@
 # ModelSentry
 
-ModelSentry is a Rust-first and Svelte-first platform for detecting silent behavior drift in LLM endpoints.
+**Self-hosted LLM drift detection.** ModelSentry continuously probes your LLM endpoints, captures statistical baselines, and fires alerts the moment model behaviour shifts — all without sending data to a third-party service.
 
-This repository is structured as an enterprise-oriented foundation: strict quality gates, explicit architecture documentation, and a phased implementation plan.
+[![CI](https://github.com/signalrust/modelsentry/actions/workflows/ci.yml/badge.svg)](https://github.com/signalrust/modelsentry/actions/workflows/ci.yml)
 
-## Project Status
+---
 
-**Phase 0 (Scaffold)** — complete:
-- Rust workspace compiles with all crate skeletons.
-- Frontend workspace (`web/`) initialized with SvelteKit 2 + Svelte 5, passes type checks.
-- CI workflow present for Rust quality gates.
-- Architecture and execution plan documented in `docs/`.
+## Quickstart (Docker Compose)
 
-**Phase 1 (Common Types)** — complete:
-- Newtype ID types (`ProbeId`, `BaselineId`, `RunId`, `AlertRuleId`) via `define_id!` macro.
-- `ApiKey` with `secrecy::SecretString` — redacted in Debug, Serialize, and logs.
-- Domain error hierarchy (`ModelSentryError`) with `thiserror`.
-- All domain models: `Probe`, `BaselineSnapshot`, `ProbeRun`, `DriftReport`, `AlertRule`, `AlertEvent`.
-- `AppConfig` with TOML loading and validation.
-- 32 unit tests passing.
+The fastest way to run ModelSentry locally — no Rust toolchain required.
 
-Not yet implemented:
-- Drift algorithms and provider integrations (Phase 2).
-- Persistence layer and API routes (Phase 3+).
-- Production operational features.
+```bash
+git clone https://github.com/signalrust/modelsentry.git
+cd modelsentry
 
-## Design Intent
+# Copy and edit the config — at minimum set your OpenAI key
+cp config/default.toml config/local.toml
+$EDITOR config/local.toml
 
-The project is intentionally designed to match expectations for professional teams using platforms like OpenAI, Anthropic, and Google model APIs:
+# Start daemon + dashboard
+docker compose up
+```
 
-- Rust backend with strong static guarantees and explicit linting/formatting standards.
-- SvelteKit frontend with strict type checking and reproducible build pipeline.
-- Documentation-driven delivery: architecture, standards, and task-level plan live in the repo.
-- Enterprise trajectory in docs: reliability controls, baseline lifecycle, and commercialization requirements.
+The dashboard opens at **http://localhost:5173**.  
+The REST API is available at **http://localhost:7740/api**.
+
+---
+
+## Quickstart (from source)
+
+### Prerequisites
+
+| Tool | Version |
+|------|---------|
+| Rust | stable (see `rust-toolchain.toml`) |
+| Node.js | ≥ 22 |
+| npm | ≥ 10 |
+
+### 1 — Install binaries
+
+```bash
+# Daemon (REST API + scheduler)
+cargo install --path crates/daemon
+
+# CLI
+cargo install --path crates/cli
+```
+
+### 2 — Configure
+
+```bash
+cp config/default.toml config/local.toml
+```
+
+Edit `config/local.toml` to set your database and vault paths (defaults write to `.modelsentry/` in the current directory). Store your LLM API key in the vault — ModelSentry never logs or writes it to disk unencrypted:
+
+```bash
+# First-time vault setup — you will be prompted for a passphrase
+modelsentry vault init
+
+# Store your OpenAI key
+modelsentry vault set openai sk-...
+```
+
+### 3 — Start the daemon
+
+```bash
+modelsentry-daemon --config config/local.toml
+# Listening on http://127.0.0.1:7740
+```
+
+### 4 — Create your first probe
+
+Create a TOML file describing the probe:
+
+```toml
+# my_probe.toml
+name         = "gpt-4o-smoke"
+provider     = "open_ai"
+model        = "gpt-4o"
+schedule     = { kind = "every_minutes", minutes = 60 }
+
+[[prompts]]
+text = "Summarise the theory of relativity in one sentence."
+
+[[prompts]]
+text = "What is the capital of France?"
+```
+
+Add it via the CLI:
+
+```bash
+modelsentry probe add --config my_probe.toml
+# Created probe  id = 018e1234-...
+```
+
+### 5 — Capture a baseline
+
+Run the probe once and lock in the statistical baseline that all future runs will be compared against:
+
+```bash
+modelsentry probe run-now 018e1234-...
+modelsentry baseline capture 018e1234-...
+```
+
+### 6 — Watch for drift
+
+ModelSentry runs the probe on the configured schedule. Check the latest drift metrics at any time:
+
+```bash
+modelsentry probe status 018e1234-...
+```
+
+```
+Probe      gpt-4o-smoke
+Status     ok
+Drift      None  (KL 0.003 / Cos 0.001)
+Last run   2026-03-06 12:00 UTC (42 s)
+Baseline   2026-03-06 11:45 UTC
+```
+
+### 7 — Set up an alert
+
+```bash
+modelsentry alert create \
+  --probe 018e1234-... \
+  --kl-threshold 0.10 \
+  --cos-threshold 0.15 \
+  --webhook https://hooks.slack.com/services/...
+```
+
+When drift exceeds either threshold the webhook fires with a JSON payload containing the full `DriftReport`.
+
+---
+
+## How It Works
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Scheduler (tokio)                                           │
+│  ┌──────────┐  run()  ┌──────────────┐  DriftReport         │
+│  │  Probe   │ ──────► │ ProbeRunner  │ ──────────────────►  │
+│  │ (config) │         │ (LLM calls)  │    DriftCalculator   │
+│  └──────────┘         └──────────────┘    (KL + cosine +    │
+│                                            entropy delta)    │
+│                                               │              │
+│                                         AlertEngine         │
+│                                         (webhook / Slack)   │
+└──────────────────────────────────────────────┴──────────────┘
+         │ REST API (axum)                      │ redb storage
+         ▼                                      ▼
+   SvelteKit Dashboard                   .modelsentry/store.redb
+```
+
+Three drift metrics are computed on every run and compared against the captured baseline:
+
+| Metric | What it measures |
+|--------|-----------------|
+| **KL divergence** (Gaussian) | Shift in the embedding distribution's mean and variance |
+| **Cosine distance** | Directional drift of the mean embedding from the baseline centroid |
+| **Entropy delta** | Change in output token distribution entropy (vocabulary breadth) |
+
+The `DriftLevel` is derived from the worst metric relative to configured thresholds:
+
+| Level | Condition |
+|-------|-----------|
+| `None` | Both metrics within threshold |
+| `Low` | 1× threshold |
+| `Medium` | 2× threshold |
+| `High` | 4× threshold |
+| `Critical` | 8× threshold |
+
+---
+
+## Supported Providers
+
+| Provider | Embeddings | Completions |
+|----------|-----------|-------------|
+| OpenAI | ✓ (`text-embedding-3-small`) | ✓ (`gpt-4o`, etc.) |
+| Anthropic | — (not supported by API) | ✓ (`claude-*`) |
+| Ollama (local) | ✓ | ✓ |
+
+---
 
 ## Repository Layout
 
 ```text
 modelsentry/
-├── Cargo.toml                 # Rust workspace
-├── rust-toolchain.toml        # Stable toolchain + components
-├── Makefile                   # Common developer commands
-├── config/default.toml        # Runtime defaults (host, port, db, scheduler)
+├── Cargo.toml                # Rust workspace (5 crates)
+├── rust-toolchain.toml       # Stable toolchain pin
+├── Makefile                  # Developer shortcuts
+├── config/default.toml       # Runtime defaults
+├── docker-compose.yml        # One-command local setup
 ├── crates/
-│   ├── common/                # Shared types/errors (scaffold)
-│   ├── core/                  # Core logic (scaffold)
-│   ├── store/                 # Persistence layer (scaffold)
-│   ├── daemon/                # Backend binary (scaffold)
-│   └── cli/                   # CLI binary (scaffold)
-├── web/                       # SvelteKit application
+│   ├── common/               # Shared types, errors, domain models
+│   ├── core/                 # Drift algorithms, provider adapters, probe runner
+│   ├── store/                # redb persistence layer
+│   ├── daemon/               # axum REST API + tokio scheduler binary
+│   └── cli/                  # modelsentry CLI binary
+├── web/                      # SvelteKit dashboard
 └── docs/
-		├── ARCHITECTURE.md
-		└── PROJECT_PLAN.md
+    ├── ARCHITECTURE.md
+    └── PROJECT_PLAN.md
 ```
 
-## Technology Baseline
+---
 
-### Backend (Rust)
+## Development
 
-- Workspace resolver: `2`
-- Edition: `2024`
-- Toolchain: stable (`rust-toolchain.toml`)
-- Key dependencies: `serde 1`, `tokio 1`, `axum 0.8`, `redb 3`, `thiserror 2`, `secrecy 0.10`, `toml 1`, `chrono 0.4`, `uuid 1`
-- Lint policy in workspace (enforced via `[lints] workspace = true` in all crates):
-	- `unsafe_code = "forbid"`
-	- `clippy::all` and `clippy::pedantic` enabled as warnings
-
-### Frontend (Svelte)
-
-- `@sveltejs/kit` with Vite
-- TypeScript strict checks via `svelte-check`
-- Dependency override present for secure transitive resolution (`cookie`)
-
-## Quality and Verification
-
-### Rust CI Gates
-
-Workflow: `.github/workflows/ci.yml`
-
-- `cargo check --workspace --all-targets`
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
-- `cargo audit`
-- frontend `npm ci`, `npm run check`, `npm run build`, `npm audit --audit-level=high`
-
-### Local Developer Commands
-
-From repository root:
+### Run all quality gates locally
 
 ```bash
-make check
-make fmt-check
-make lint
-make test
+make check      # cargo check --workspace --all-targets
+make fmt-check  # cargo fmt --all -- --check
+make lint       # cargo clippy --workspace --all-targets -- -D warnings
+make test       # cargo test --workspace
+```
+
+### Run benchmarks
+
+```bash
+cargo bench -p modelsentry-core
+```
+
+Criterion HTML reports are written to `target/criterion/`.
+
+### Frontend dev server
+
+```bash
+cd web
+npm ci
+npm run dev      # http://localhost:5173 (proxies /api to :7740)
 ```
 
 ### Frontend Checks

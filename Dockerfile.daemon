@@ -1,0 +1,33 @@
+# ── Build stage ───────────────────────────────────────────────────────────────
+FROM rust:slim AS builder
+
+# Required for redb (needs cc for linking)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN cargo build --release -p modelsentry-daemon -p modelsentry-cli \
+    && strip target/release/modelsentry-daemon \
+    && strip target/release/modelsentry
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/modelsentry-daemon /usr/local/bin/
+COPY --from=builder /build/target/release/modelsentry         /usr/local/bin/
+COPY config/default.toml /etc/modelsentry/config.toml
+
+RUN mkdir -p /data/.modelsentry
+
+EXPOSE 7740
+
+CMD ["modelsentry-daemon", "--config", "/etc/modelsentry/config.toml"]

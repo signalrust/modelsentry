@@ -1839,9 +1839,9 @@ config/default.toml     (finalize)
 ```
 
 **Definition of Done:**
-- [ ] README covers: install → configure → first probe → first baseline → first alert
-- [ ] `cargo install --path crates/daemon` documented
-- [ ] Docker Compose file for one-command local setup
+- [x] README covers: install → configure → first probe → first baseline → first alert
+- [x] `cargo install --path crates/daemon` documented
+- [x] Docker Compose file for one-command local setup
 
 ---
 
