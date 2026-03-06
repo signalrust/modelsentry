@@ -118,12 +118,15 @@ async fn below_threshold_report_does_not_fire_webhook() {
     let engine = AlertEngine::new(reqwest::Client::new());
     let events = engine.evaluate_and_fire(&report, &[rule]).await;
 
-    assert!(events.is_empty(), "sub-threshold report should produce no events");
+    assert!(
+        events.is_empty(),
+        "sub-threshold report should produce no events"
+    );
 
     server.verify().await;
 }
 
-/// Alert event fields (event_id, rule_id, drift_level) must be present in the
+/// Alert event fields (`event_id`, `rule_id`, `drift_level`) must be present in the
 /// webhook POST body.
 #[tokio::test]
 async fn webhook_payload_contains_required_fields() {

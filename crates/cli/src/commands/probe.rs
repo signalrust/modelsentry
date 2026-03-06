@@ -102,10 +102,22 @@ fn print_run_result(run: &ProbeRun) {
     if let Some(report) = &run.drift_report {
         println!();
         let rows = vec![
-            DriftRow { metric: "Drift Level".to_owned(),         value: drift_label(&report.drift_level).to_owned() },
-            DriftRow { metric: "KL Divergence".to_owned(),       value: format!("{:.6}", report.kl_divergence) },
-            DriftRow { metric: "Cosine Distance".to_owned(),     value: format!("{:.6}", report.cosine_distance) },
-            DriftRow { metric: "Entropy Delta".to_owned(),       value: format!("{:.6}", report.output_entropy_delta) },
+            DriftRow {
+                metric: "Drift Level".to_owned(),
+                value: drift_label(&report.drift_level).to_owned(),
+            },
+            DriftRow {
+                metric: "KL Divergence".to_owned(),
+                value: format!("{:.6}", report.kl_divergence),
+            },
+            DriftRow {
+                metric: "Cosine Distance".to_owned(),
+                value: format!("{:.6}", report.cosine_distance),
+            },
+            DriftRow {
+                metric: "Entropy Delta".to_owned(),
+                value: format!("{:.6}", report.output_entropy_delta),
+            },
         ];
         println!("{}", Table::new(rows));
     } else {

@@ -98,7 +98,10 @@ fn drift_detected_when_embedding_centroid_shifts_beyond_threshold() {
         vec![vec![0.0_f32, 1.0, 0.0], vec![0.0, 1.0, 0.0]],
         vec![1.0_f32, 0.0, 0.0], // orthogonal to run
         0.0,
-        vec!["the quick brown fox jumped over", "a completely different sentence here"],
+        vec![
+            "the quick brown fox jumped over",
+            "a completely different sentence here",
+        ],
         vec![vec!["hello"], vec!["hello"]],
     );
 

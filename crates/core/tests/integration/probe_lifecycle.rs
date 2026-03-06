@@ -15,7 +15,7 @@ use modelsentry_common::{
     types::{BaselineId, ProbeId, RunId},
 };
 use modelsentry_core::{
-    drift::{calculator::DriftCalculator, Embedding},
+    drift::{Embedding, calculator::DriftCalculator},
     probe_runner::ProbeRunner,
     provider::LlmProvider,
 };
@@ -34,11 +34,19 @@ struct StubProvider {
 
 impl StubProvider {
     fn new(embedding: Vec<f32>, completion: impl Into<String>) -> Self {
-        Self { embedding, completion: completion.into(), fail_embed: false }
+        Self {
+            embedding,
+            completion: completion.into(),
+            fail_embed: false,
+        }
     }
 
     fn flaky(embedding: Vec<f32>, completion: impl Into<String>) -> Self {
-        Self { embedding, completion: completion.into(), fail_embed: true }
+        Self {
+            embedding,
+            completion: completion.into(),
+            fail_embed: true,
+        }
     }
 }
 
@@ -241,11 +249,17 @@ async fn delete_probe_also_deletes_associated_runs_and_baselines() {
 
     // Confirm data is there before deletion
     assert_eq!(store.runs().list_for_probe(&probe_id, 10).unwrap().len(), 2);
-    assert_eq!(store.baselines().list_for_probe(&probe_id).unwrap().len(), 1);
+    assert_eq!(
+        store.baselines().list_for_probe(&probe_id).unwrap().len(),
+        1
+    );
 
     // Cascade delete
     let deleted = store.delete_probe_cascade(&probe_id).unwrap();
-    assert!(deleted, "cascade delete should return true for existing probe");
+    assert!(
+        deleted,
+        "cascade delete should return true for existing probe"
+    );
 
     // Probe is gone
     assert!(store.probes().get(&probe_id).unwrap().is_none());

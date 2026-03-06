@@ -4,18 +4,15 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use modelsentry_core::drift::{
-    Embedding,
-    calculator::DriftCalculator,
-    cosine::cosine_distance,
-    entropy::entropy_delta,
-    kl::gaussian_kl,
-};
+use chrono::Utc;
 use modelsentry_common::{
     models::{BaselineSnapshot, ProbeRun, RunStatus},
     types::{BaselineId, ProbeId, RunId},
 };
-use chrono::Utc;
+use modelsentry_core::drift::{
+    Embedding, calculator::DriftCalculator, cosine::cosine_distance, entropy::entropy_delta,
+    kl::gaussian_kl,
+};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -78,11 +75,10 @@ fn bench_kl_divergence(c: &mut Criterion) {
             // that would result from n-dimensional embeddings.
             let mu1 = 1.0_f32;
             let sigma1 = 0.1_f32;
+            #[allow(clippy::cast_precision_loss)]
             let mu2 = 1.0_f32 + (n as f32).sqrt() * 0.001;
             let sigma2 = 0.1_f32;
-            b.iter(|| {
-                gaussian_kl(mu1, sigma1, mu2, sigma2).unwrap()
-            });
+            b.iter(|| gaussian_kl(mu1, sigma1, mu2, sigma2).unwrap());
         });
     }
 
@@ -98,7 +94,9 @@ fn bench_cosine_distance(c: &mut Criterion) {
             // Slightly rotated vector
             let mut raw = vec![0.0_f32; n];
             raw[0] = 0.9;
-            if n > 1 { raw[1] = 0.1; }
+            if n > 1 {
+                raw[1] = 0.1;
+            }
             let b_emb = Embedding::new(raw).unwrap();
             b.iter(|| cosine_distance(&a, &b_emb).unwrap());
         });
@@ -114,9 +112,7 @@ fn bench_output_entropy(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             // n completions of 20 tokens each
             let completions: Vec<Vec<String>> = (0..n)
-                .map(|i| {
-                    (0..20).map(|j| format!("tok_{}", (i + j) % 15)).collect()
-                })
+                .map(|i| (0..20).map(|j| format!("tok_{}", (i + j) % 15)).collect())
                 .collect();
             let baseline_tokens: Vec<Vec<String>> = completions.clone();
             b.iter(|| entropy_delta(&completions, &baseline_tokens).unwrap());
