@@ -78,7 +78,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/api", api)
         // Serve the embedded SvelteKit dashboard for all non-API requests
         .route("/", get(serve_index))
-        .route("/*path", get(serve_static))
+        .route("/{*path}", get(serve_static))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
