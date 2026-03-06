@@ -4,8 +4,20 @@ version.workspace = true
 edition.workspace = true
 license-file.workspace = true
 
+[[bin]]
+name = "modelsentry"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+tabled = "0.17"
+toml.workspace = true
+modelsentry-common = { path = "../common" }
 
 [lints]
 workspace = true
