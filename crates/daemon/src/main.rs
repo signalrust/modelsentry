@@ -143,13 +143,18 @@ async fn main() -> anyhow::Result<()> {
             Ok(Some(key)) => key.expose().to_string(),
             _ => "http://localhost:11434".to_string(),
         };
-        match OllamaProvider::new("llama3", base_url.clone()) {
+        // Vault key "ollama:model" lets you set the model without touching source.
+        let ollama_model = match vault.get_key("ollama:model") {
+            Ok(Some(key)) => key.expose().to_string(),
+            _ => "llama3".to_string(),
+        };
+        match OllamaProvider::new(ollama_model.clone(), base_url.clone()) {
             Ok(p) => {
                 provider_map
                     .write()
                     .unwrap()
                     .insert(format!("ollama:{base_url}"), Arc::new(p));
-                tracing::info!(base_url = %base_url, "provider registered: ollama");
+                tracing::info!(base_url = %base_url, model = %ollama_model, "provider registered: ollama");
             }
             Err(e) => tracing::warn!("failed to initialise Ollama provider: {e}"),
         }

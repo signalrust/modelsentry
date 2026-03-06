@@ -81,7 +81,9 @@ async fn upsert_key(
     Path(provider_id): Path<String>,
     Json(body): Json<UpsertKeyRequest>,
 ) -> Result<(StatusCode, Json<UpsertKeyResponse>), AppError> {
-    if body.key.trim().is_empty() {
+    // Ollama has no API key — the 'key' field is used as the base URL and may
+    // be empty (falls back to http://localhost:11434).
+    if !provider_id.starts_with("ollama") && body.key.trim().is_empty() {
         return Err(AppError(ModelSentryError::Config {
             message: "key must not be empty".to_string(),
         }));
@@ -107,11 +109,20 @@ async fn upsert_key(
         })?;
 
     if let Some(p) = dyn_provider {
-        state
-            .providers
-            .write()
-            .unwrap()
-            .insert(provider_id.clone(), p);
+        // Use the same registry-key convention as provider_key() in the scheduler
+        // so that probe lookups always find the right entry.
+        // Ollama: "ollama:{base_url}";  others: "{provider_id}".
+        let registry_key = if provider_id.starts_with("ollama") {
+            let base_url = if body.key.trim().is_empty() {
+                body.base_url.as_deref().unwrap_or("http://localhost:11434")
+            } else {
+                body.key.trim()
+            };
+            format!("ollama:{base_url}")
+        } else {
+            provider_id.clone()
+        };
+        state.providers.write().unwrap().insert(registry_key, p);
         tracing::info!(provider = %provider_id, "provider registered via vault API");
     } else {
         tracing::info!(
@@ -133,6 +144,19 @@ async fn delete_key(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
+    // For Ollama, read the stored base_url *before* deleting so we can derive
+    // the correct registry key ("ollama:{base_url}") to evict from the live map.
+    let stored_base_url: Option<String> = if provider_id.starts_with("ollama") {
+        state
+            .vault
+            .get_key(&provider_id)
+            .ok()
+            .flatten()
+            .map(|k| k.expose().to_string())
+    } else {
+        None
+    };
+
     let removed = state.vault.delete_key(&provider_id).map_err(|e| {
         AppError(ModelSentryError::Vault {
             message: e.to_string(),
@@ -140,7 +164,16 @@ async fn delete_key(
     })?;
 
     if removed {
-        state.providers.write().unwrap().remove(&provider_id);
+        let registry_key = if provider_id.starts_with("ollama") {
+            let base_url = stored_base_url
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("http://localhost:11434");
+            format!("ollama:{base_url}")
+        } else {
+            provider_id.clone()
+        };
+        state.providers.write().unwrap().remove(&registry_key);
         tracing::info!(provider = %provider_id, "provider removed via vault API");
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -176,10 +209,16 @@ fn build_provider(
             Some(AnthropicProvider::new(key, model).map(|p| Arc::new(p) as DynProvider))
         }
         id if id.starts_with("ollama") => {
-            let base_url = body
-                .base_url
-                .clone()
-                .unwrap_or_else(|| "http://localhost:11434".to_string());
+            // For Ollama the 'key' field holds the base URL (no API auth needed).
+            // Fall back to body.base_url then to localhost for compatibility.
+            let key_str = key.expose().trim().to_string();
+            let base_url = if key_str.is_empty() {
+                body.base_url
+                    .clone()
+                    .unwrap_or_else(|| "http://localhost:11434".to_string())
+            } else {
+                key_str
+            };
             let model = body.model.as_deref().unwrap_or("llama3").to_string();
             Some(OllamaProvider::new(model, base_url).map(|p| Arc::new(p) as DynProvider))
         }
