@@ -18,8 +18,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+include_dir.workspace = true
+mime_guess.workspace = true
 tower = { version = "0.5", features = ["timeout"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 tracing.workspace = true
 uuid.workspace = true
 

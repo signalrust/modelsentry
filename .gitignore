@@ -3,6 +3,9 @@ target/
 node_modules/
 .web/
 .svelte-kit/
+# SvelteKit static build output (populated by CI before Rust build embeds it)
+web/build/
+!web/build/.gitkeep
 .env
 .modelsentry/
 *.log

@@ -1853,9 +1853,9 @@ config/default.toml     (finalize)
 ```
 
 **Definition of Done:**
-- [ ] On `git tag v*`, workflow builds Linux x86-64 and macOS aarch64 binaries
-- [ ] Binaries attached to GitHub Release
-- [ ] Frontend static build embedded into daemon binary via `include_dir!` macro
+- [x] On `git tag v*`, workflow builds Linux x86-64 and macOS aarch64 binaries
+- [x] Binaries attached to GitHub Release
+- [x] Frontend static build embedded into daemon binary via `include_dir!` macro
 
 ---
 
