@@ -7,7 +7,7 @@ use modelsentry_common::{
     models::{BaselineSnapshot, DriftLevel, DriftReport, ProbeRun},
 };
 
-use super::{cosine, entropy, kl, Embedding};
+use super::{Embedding, cosine, entropy, kl};
 
 /// Minimum standard deviation used when modelling embedding norm distributions
 /// as Gaussians. Prevents division by zero when all embeddings have identical
@@ -82,8 +82,11 @@ impl DriftCalculator {
         #[allow(clippy::cast_precision_loss)]
         let n = run_norms.len() as f32;
         let mu_run = run_norms.iter().sum::<f32>() / n;
-        let variance_run =
-            run_norms.iter().map(|x| (x - mu_run) * (x - mu_run)).sum::<f32>() / n;
+        let variance_run = run_norms
+            .iter()
+            .map(|x| (x - mu_run) * (x - mu_run))
+            .sum::<f32>()
+            / n;
         let sigma_run = variance_run.sqrt().max(SIGMA_FLOOR);
 
         let mu_baseline = baseline_embedding.l2_norm();
@@ -214,10 +217,7 @@ mod tests {
             captured_at: Utc::now(),
             embedding_centroid: vec![1.0_f32, 0.0, 0.0],
             embedding_variance: 0.0,
-            output_tokens: vec![
-                vec!["hello".into()],
-                vec!["hello".into()],
-            ],
+            output_tokens: vec![vec!["hello".into()], vec!["hello".into()]],
             run_id,
         };
 

@@ -26,11 +26,7 @@ pub fn token_entropy(tokens: &[String]) -> f32 {
         .map(|&c| {
             #[allow(clippy::cast_precision_loss)]
             let p = c as f32 / n;
-            if p > 0.0 {
-                -p * p.log2()
-            } else {
-                0.0
-            }
+            if p > 0.0 { -p * p.log2() } else { 0.0 }
         })
         .sum()
 }
@@ -47,7 +43,10 @@ pub fn mean_entropy(completions: &[Vec<String>]) -> Result<f32> {
         });
     }
     #[allow(clippy::cast_precision_loss)]
-    let mean = completions.iter().map(|toks| token_entropy(toks)).sum::<f32>()
+    let mean = completions
+        .iter()
+        .map(|toks| token_entropy(toks))
+        .sum::<f32>()
         / completions.len() as f32;
     Ok(mean)
 }
@@ -131,7 +130,12 @@ mod tests {
     /// 4 equally likely tokens → H = log₂(4) = 2 bits.
     #[test]
     fn entropy_of_four_uniform_tokens_is_two_bits() {
-        let tokens = vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()];
+        let tokens = vec![
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+            "d".to_owned(),
+        ];
         let h = token_entropy(&tokens);
         assert!((h - 2.0).abs() < EPS, "expected 2 bits, got {h}");
     }
@@ -140,9 +144,19 @@ mod tests {
     #[test]
     fn uniform_distribution_higher_entropy_than_skewed() {
         // Uniform: equal representation
-        let uniform = vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()];
+        let uniform = vec![
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+            "d".to_owned(),
+        ];
         // Skewed: mostly one token
-        let skewed = vec!["a".to_owned(), "a".to_owned(), "a".to_owned(), "b".to_owned()];
+        let skewed = vec![
+            "a".to_owned(),
+            "a".to_owned(),
+            "a".to_owned(),
+            "b".to_owned(),
+        ];
         assert!(
             token_entropy(&uniform) > token_entropy(&skewed),
             "uniform should have higher entropy than skewed"
@@ -152,11 +166,24 @@ mod tests {
     /// `entropy_delta` is independent of which side is higher (absolute value).
     #[test]
     fn entropy_delta_is_symmetric() {
-        let high_entropy = vec![vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()]];
-        let low_entropy = vec![vec!["a".to_owned(), "a".to_owned(), "a".to_owned(), "b".to_owned()]];
+        let high_entropy = vec![vec![
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+            "d".to_owned(),
+        ]];
+        let low_entropy = vec![vec![
+            "a".to_owned(),
+            "a".to_owned(),
+            "a".to_owned(),
+            "b".to_owned(),
+        ]];
         let d1 = entropy_delta(&high_entropy, &low_entropy).unwrap();
         let d2 = entropy_delta(&low_entropy, &high_entropy).unwrap();
-        assert!((d1 - d2).abs() < EPS, "entropy_delta should be symmetric: {d1} vs {d2}");
+        assert!(
+            (d1 - d2).abs() < EPS,
+            "entropy_delta should be symmetric: {d1} vs {d2}"
+        );
     }
 
     #[test]

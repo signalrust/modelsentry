@@ -30,12 +30,16 @@ pub fn kl_divergence(p: &[f32], q: &[f32]) -> Result<f32> {
     for (i, (&pi, &qi)) in p.iter().zip(q.iter()).enumerate() {
         if pi < 0.0 || qi < 0.0 {
             return Err(ModelSentryError::Provider {
-                message: format!("distribution values must be non-negative; got p[{i}]={pi}, q[{i}]={qi}"),
+                message: format!(
+                    "distribution values must be non-negative; got p[{i}]={pi}, q[{i}]={qi}"
+                ),
             });
         }
         if pi > 0.0 && qi <= 0.0 {
             return Err(ModelSentryError::Provider {
-                message: format!("q[{i}] is zero where p[{i}] is non-zero — KL divergence is undefined"),
+                message: format!(
+                    "q[{i}] is zero where p[{i}] is non-zero — KL divergence is undefined"
+                ),
             });
         }
     }
@@ -58,9 +62,7 @@ pub fn kl_divergence(p: &[f32], q: &[f32]) -> Result<f32> {
 pub fn gaussian_kl(mu1: f32, sigma1: f32, mu2: f32, sigma2: f32) -> Result<f32> {
     if sigma1 <= 0.0 || sigma2 <= 0.0 {
         return Err(ModelSentryError::Provider {
-            message: format!(
-                "sigma must be positive; got sigma1={sigma1}, sigma2={sigma2}"
-            ),
+            message: format!("sigma must be positive; got sigma1={sigma1}, sigma2={sigma2}"),
         });
     }
     let kl = (sigma2 / sigma1).ln()
