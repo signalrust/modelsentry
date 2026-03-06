@@ -5,8 +5,12 @@
 //! can be used to stop the scheduler gracefully.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+
+use chrono::Utc;
+use cron::Schedule;
 
 use modelsentry_common::error::Result;
 use modelsentry_common::models::{Probe, ProbeSchedule, ProviderKind};
@@ -132,9 +136,8 @@ async fn run_probe_loop(
     calculator: Arc<DriftCalculator>,
     alert_engine: Arc<AlertEngine>,
 ) {
-    let interval = schedule_to_duration(&probe.schedule);
     loop {
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(sleep_until_next_run(&probe.schedule)).await;
 
         let key = provider_key(&probe.provider);
         let Some(provider) = providers.get(&key).cloned() else {
@@ -186,12 +189,28 @@ async fn run_probe_job(
     Ok(())
 }
 
-fn schedule_to_duration(schedule: &ProbeSchedule) -> Duration {
+fn sleep_until_next_run(schedule: &ProbeSchedule) -> Duration {
     match schedule {
         ProbeSchedule::EveryMinutes { minutes } => Duration::from_secs(u64::from(*minutes) * 60),
-        ProbeSchedule::Cron { expression: _ } => {
-            // TODO: parse cron expression — fall back to hourly for now
-            Duration::from_secs(60 * 60)
+        ProbeSchedule::Cron { expression } => {
+            // Support both 6-field (sec min hour dom month dow) and standard
+            // 5-field (min hour dom month dow) cron by auto-prepending "0 ".
+            let parsed = Schedule::from_str(expression)
+                .or_else(|_| Schedule::from_str(&format!("0 {expression}")));
+            match parsed {
+                Ok(sched) => sched
+                    .upcoming(Utc)
+                    .next()
+                    .and_then(|t| (t - Utc::now()).to_std().ok())
+                    .unwrap_or(Duration::from_secs(1)),
+                Err(e) => {
+                    tracing::warn!(
+                        expr = expression,
+                        "invalid cron expression: {e}; falling back to 1-hour interval"
+                    );
+                    Duration::from_secs(60 * 60)
+                }
+            }
         }
     }
 }
@@ -416,5 +435,47 @@ mod tests {
 
         // Scheduler must still be alive — shutdown must complete.
         handle.shutdown().await;
+    }
+
+    // --- cron schedule unit tests ---
+
+    #[test]
+    fn every_minutes_gives_exact_duration() {
+        let s = ProbeSchedule::EveryMinutes { minutes: 15 };
+        assert_eq!(sleep_until_next_run(&s), Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn valid_cron_gives_positive_duration_under_one_period() {
+        // "every minute" — next tick is ≤60 s away
+        let s = ProbeSchedule::Cron {
+            expression: "* * * * *".to_string(),
+        };
+        let dur = sleep_until_next_run(&s);
+        assert!(
+            dur <= Duration::from_secs(60),
+            "expected ≤60 s, got {dur:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_cron_falls_back_to_hourly() {
+        let s = ProbeSchedule::Cron {
+            expression: "not-a-cron-expr".to_string(),
+        };
+        assert_eq!(sleep_until_next_run(&s), Duration::from_secs(60 * 60));
+    }
+
+    #[test]
+    fn six_field_cron_is_parsed_directly() {
+        // 6-field: sec min hour dom month dow — "every minute at second 0"
+        let s = ProbeSchedule::Cron {
+            expression: "0 * * * * *".to_string(),
+        };
+        let dur = sleep_until_next_run(&s);
+        assert!(
+            dur <= Duration::from_secs(60),
+            "expected ≤60 s, got {dur:?}"
+        );
     }
 }

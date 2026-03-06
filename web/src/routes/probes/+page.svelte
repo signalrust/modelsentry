@@ -3,11 +3,13 @@
   import { api } from '$lib/api.js';
   import type { Probe, ProbeRun } from '$lib/types.js';
   import ProbeTable from '$lib/components/ProbeTable.svelte';
+  import AddProbeForm from '$lib/components/AddProbeForm.svelte';
 
   let probes: Probe[] = [];
   let latestRunMap: Record<string, ProbeRun | null> = {};
   let loading = true;
   let error: string | null = null;
+  let showForm = false;
 
   onMount(async () => {
     try {
@@ -27,6 +29,12 @@
       loading = false;
     }
   });
+
+  function onProbeCreated(event: CustomEvent<Probe>) {
+    probes = [event.detail, ...probes];
+    latestRunMap = { [event.detail.id]: null, ...latestRunMap };
+    showForm = false;
+  }
 </script>
 
 <svelte:head>
@@ -40,14 +48,25 @@
         <h1>Probes</h1>
         <p class="subtitle">All configured LLM probes</p>
       </div>
-      <a class="btn-primary" href="/">← Dashboard</a>
+      <div class="header-actions">
+        <button class="btn-new" on:click={() => (showForm = !showForm)}>
+          {showForm ? '✕ Cancel' : '+ New Probe'}
+        </button>
+        <a class="btn-back" href="/">← Dashboard</a>
+      </div>
     </div>
   </header>
+
+  {#if showForm}
+    <AddProbeForm on:created={onProbeCreated} on:cancel={() => (showForm = false)} />
+  {/if}
 
   {#if loading}
     <p class="status-msg">Loading…</p>
   {:else if error}
     <p class="error-msg">Failed to load probes: {error}</p>
+  {:else if probes.length === 0 && !showForm}
+    <p class="status-msg">No probes yet — click <strong>+ New Probe</strong> to add one.</p>
   {:else}
     <ProbeTable {probes} {latestRunMap} />
   {/if}
@@ -79,7 +98,31 @@
     font-size: 0.875rem;
   }
 
-  .btn-primary {
+  .header-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .btn-new {
+    display: inline-block;
+    padding: 0.45rem 1rem;
+    background: #6366f1;
+    color: #fff;
+    border: none;
+    border-radius: 0.4rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .btn-new:hover {
+    background: #4f46e5;
+  }
+
+  .btn-back {
     display: inline-block;
     padding: 0.45rem 1rem;
     background: #f1f5f9;
@@ -92,7 +135,7 @@
     border: 1px solid #e2e8f0;
   }
 
-  .btn-primary:hover {
+  .btn-back:hover {
     background: #e2e8f0;
   }
 
