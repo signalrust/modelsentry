@@ -288,4 +288,116 @@ mod tests {
         assert!(DriftCalculator::new(0.1, 0.0).is_err());
         assert!(DriftCalculator::new(-1.0, 0.1).is_err());
     }
+
+    // --- DriftLevel boundary tests (all four non-None buckets) ---
+    // These call classify_level directly since it's private but accessible within
+    // the same module's test block.
+
+    #[test]
+    fn classify_level_none_below_both_thresholds() {
+        let calc = calculator();
+        assert_eq!(calc.classify_level(0.05, 0.05), DriftLevel::None);
+    }
+
+    #[test]
+    fn classify_level_low_at_1x_to_2x() {
+        // kl = 1.5× threshold (0.15), cosine = 0 → max_ratio = 1.5 → Low
+        let calc = calculator();
+        assert_eq!(calc.classify_level(0.15, 0.0), DriftLevel::Low);
+    }
+
+    #[test]
+    fn classify_level_medium_at_2x_to_4x() {
+        // kl = 2.5× threshold (0.25) → Medium
+        let calc = calculator();
+        assert_eq!(calc.classify_level(0.25, 0.0), DriftLevel::Medium);
+    }
+
+    #[test]
+    fn classify_level_high_at_4x_to_8x() {
+        // kl = 5× threshold (0.5) → High
+        let calc = calculator();
+        assert_eq!(calc.classify_level(0.5, 0.0), DriftLevel::High);
+    }
+
+    #[test]
+    fn classify_level_critical_at_8x_plus() {
+        // kl = 10× threshold (1.0) → Critical
+        let calc = calculator();
+        assert_eq!(calc.classify_level(1.0, 0.0), DriftLevel::Critical);
+    }
+
+    #[test]
+    fn classify_level_cosine_drives_when_higher() {
+        // cosine = 9× threshold (1.35), kl = 0 → cosine drives → Critical
+        let calc = calculator();
+        assert_eq!(calc.classify_level(0.0, 1.35), DriftLevel::Critical);
+    }
+
+    /// Run where cosine direction drifts (embeddings pointing differently)
+    /// but norms are equal — verifies cosine path is exercised in compute().
+    #[test]
+    fn cosine_driven_drift_produces_nonzero_cosine_in_report() {
+        let probe_id = ProbeId::new();
+        let run_id = RunId::new();
+
+        // Run embeddings point in a different direction than the baseline centroid
+        let run = ProbeRun {
+            id: run_id.clone(),
+            probe_id: probe_id.clone(),
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            embeddings: vec![vec![0.0_f32, 1.0, 0.0], vec![0.0, 1.0, 0.0]],
+            completions: vec!["hello world".into(), "hello world".into()],
+            drift_report: None,
+            status: RunStatus::Success,
+        };
+        // Baseline centroid points in the X direction
+        let baseline = BaselineSnapshot {
+            id: BaselineId::new(),
+            probe_id,
+            captured_at: Utc::now(),
+            embedding_centroid: vec![1.0_f32, 0.0, 0.0],
+            embedding_variance: 0.0,
+            output_tokens: vec![
+                vec!["hello".into(), "world".into()],
+                vec!["hello".into(), "world".into()],
+            ],
+            run_id,
+        };
+        let report = calculator().compute(&run, &baseline).unwrap();
+        // [0,1,0] vs [1,0,0] are orthogonal → cosine_distance = 0.5
+        assert!(
+            report.cosine_distance > 0.4,
+            "expected strong cosine drift, got {}",
+            report.cosine_distance
+        );
+    }
+
+    /// A run with no completions should fail at the entropy step, not panic.
+    #[test]
+    fn run_with_empty_completions_returns_error() {
+        let probe_id = ProbeId::new();
+        let run_id = RunId::new();
+        let run = ProbeRun {
+            id: run_id.clone(),
+            probe_id: probe_id.clone(),
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            embeddings: vec![vec![1.0_f32, 0.0, 0.0]],
+            completions: vec![], // no completions → entropy_delta will fail
+            drift_report: None,
+            status: RunStatus::Success,
+        };
+        let baseline = BaselineSnapshot {
+            id: BaselineId::new(),
+            probe_id,
+            captured_at: Utc::now(),
+            embedding_centroid: vec![1.0_f32, 0.0, 0.0],
+            embedding_variance: 0.0,
+            output_tokens: vec![vec!["hello".into()]],
+            run_id,
+        };
+        assert!(calculator().compute(&run, &baseline).is_err());
+    }
 }

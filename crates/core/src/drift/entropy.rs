@@ -128,6 +128,37 @@ mod tests {
         assert!(mean_entropy(&[]).is_err());
     }
 
+    /// 4 equally likely tokens → H = log₂(4) = 2 bits.
+    #[test]
+    fn entropy_of_four_uniform_tokens_is_two_bits() {
+        let tokens = vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()];
+        let h = token_entropy(&tokens);
+        assert!((h - 2.0).abs() < EPS, "expected 2 bits, got {h}");
+    }
+
+    /// A uniform distribution has strictly higher entropy than a skewed one.
+    #[test]
+    fn uniform_distribution_higher_entropy_than_skewed() {
+        // Uniform: equal representation
+        let uniform = vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()];
+        // Skewed: mostly one token
+        let skewed = vec!["a".to_owned(), "a".to_owned(), "a".to_owned(), "b".to_owned()];
+        assert!(
+            token_entropy(&uniform) > token_entropy(&skewed),
+            "uniform should have higher entropy than skewed"
+        );
+    }
+
+    /// entropy_delta is independent of which side is higher (absolute value).
+    #[test]
+    fn entropy_delta_is_symmetric() {
+        let high_entropy = vec![vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()]];
+        let low_entropy = vec![vec!["a".to_owned(), "a".to_owned(), "a".to_owned(), "b".to_owned()]];
+        let d1 = entropy_delta(&high_entropy, &low_entropy).unwrap();
+        let d2 = entropy_delta(&low_entropy, &high_entropy).unwrap();
+        assert!((d1 - d2).abs() < EPS, "entropy_delta should be symmetric: {d1} vs {d2}");
+    }
+
     #[test]
     fn tokenize_lowercases_and_strips_punctuation() {
         let tokens = tokenize("Hello, World!");

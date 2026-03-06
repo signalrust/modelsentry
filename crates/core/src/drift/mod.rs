@@ -157,6 +157,32 @@ mod tests {
         assert!((e.l2_norm() - 1.0).abs() < 1e-6);
     }
 
+    /// [1,2,3]·[4,5,6] = 4+10+18 = 32.
+    #[test]
+    fn dot_product_known_value() {
+        let a = Embedding::new(vec![1.0, 2.0, 3.0]).unwrap();
+        let b = Embedding::new(vec![4.0, 5.0, 6.0]).unwrap();
+        let result = a.dot(&b).unwrap();
+        assert!((result - 32.0).abs() < 1e-5, "expected 32, got {result}");
+    }
+
+    /// Dot product of orthogonal vectors is zero.
+    #[test]
+    fn dot_product_of_orthogonal_vectors_is_zero() {
+        let a = Embedding::new(vec![1.0, 0.0]).unwrap();
+        let b = Embedding::new(vec![0.0, 1.0]).unwrap();
+        let result = a.dot(&b).unwrap();
+        assert!(result.abs() < 1e-5, "expected 0, got {result}");
+    }
+
+    /// Dot product rejects mismatched dimensions.
+    #[test]
+    fn dot_product_rejects_mismatched_dims() {
+        let a = Embedding::new(vec![1.0, 0.0]).unwrap();
+        let b = Embedding::new(vec![1.0, 0.0, 0.0]).unwrap();
+        assert!(a.dot(&b).is_err());
+    }
+
     proptest! {
         #[test]
         fn centroid_dim_equals_input_dim(

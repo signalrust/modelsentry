@@ -160,6 +160,64 @@ mod tests {
         assert!(normalize(&[0.0, 0.0, 0.0]).is_err());
     }
 
+    /// D_KL(p||q) for p=[0.5,0.5], q=[0.75,0.25].
+    /// Hand-computed: 0.5*ln(2/3) + 0.5*ln(2) ≈ 0.1438
+    #[test]
+    fn kl_known_value() {
+        let p = vec![0.5_f32, 0.5];
+        let q = vec![0.75_f32, 0.25];
+        let result = kl_divergence(&p, &q).unwrap();
+        assert!(
+            (result - 0.143_841_2_f32).abs() < 1e-4,
+            "expected ≈0.1438, got {result}"
+        );
+    }
+
+    /// KL divergence is NOT symmetric: D_KL(p||q) ≠ D_KL(q||p).
+    /// Catches any accidentally symmetrised implementation.
+    #[test]
+    fn kl_is_asymmetric() {
+        let p = vec![0.9_f32, 0.1];
+        let q = vec![0.5_f32, 0.5];
+        let kl_pq = kl_divergence(&p, &q).unwrap();
+        let kl_qp = kl_divergence(&q, &p).unwrap();
+        assert!(
+            (kl_pq - kl_qp).abs() > 0.01,
+            "KL should be asymmetric: D(p||q)={kl_pq}, D(q||p)={kl_qp}"
+        );
+    }
+
+    /// For N(0,1) || N(0,2): KL = ln(2) + 1/8 - 0.5 ≈ 0.3181
+    #[test]
+    fn gaussian_kl_known_value() {
+        let result = gaussian_kl(0.0, 1.0, 0.0, 2.0).unwrap();
+        assert!(
+            (result - 0.318_147_2_f32).abs() < 1e-4,
+            "expected ≈0.3181, got {result}"
+        );
+    }
+
+    /// Gaussian KL is NOT symmetric.
+    #[test]
+    fn gaussian_kl_is_asymmetric() {
+        let kl_12 = gaussian_kl(0.0, 1.0, 0.0, 2.0).unwrap();
+        let kl_21 = gaussian_kl(0.0, 2.0, 0.0, 1.0).unwrap();
+        assert!(
+            (kl_12 - kl_21).abs() > 0.01,
+            "Gaussian KL should be asymmetric: D(1||2)={kl_12}, D(2||1)={kl_21}"
+        );
+    }
+
+    /// Normalizing preserves relative ratios between components.
+    #[test]
+    fn normalize_preserves_ratios() {
+        let counts = vec![1.0_f32, 2.0, 3.0];
+        let dist = normalize(&counts).unwrap();
+        // 1:2:3 ratios must be preserved
+        assert!((dist[1] / dist[0] - 2.0).abs() < 1e-5);
+        assert!((dist[2] / dist[0] - 3.0).abs() < 1e-5);
+    }
+
     proptest! {
         #[test]
         fn kl_divergence_is_always_nonnegative(
