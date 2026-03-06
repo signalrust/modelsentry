@@ -6,8 +6,12 @@ license-file.workspace = true
 
 [dependencies]
 modelsentry-common = { path = "../common" }
+chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true

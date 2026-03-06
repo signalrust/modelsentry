@@ -26,6 +26,7 @@ axum = "0.8"
 redb = "3"
 secrecy = "0.10"
 toml = "1"
+proptest = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
