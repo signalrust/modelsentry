@@ -1,0 +1,16 @@
+[server]
+host = "127.0.0.1"
+port = 7740
+
+[vault]
+path = ".modelsentry/vault"
+
+[database]
+path = ".modelsentry/store.redb"
+
+[scheduler]
+default_interval_minutes = 60
+
+[alerts]
+drift_threshold_kl = 0.1
+drift_threshold_cos = 0.15

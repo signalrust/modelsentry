@@ -1,0 +1,38 @@
+name: Bug Report
+description: Report an unexpected behavior or regression
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Provide a minimal reproduction.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust version, Node version, commit hash
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Redact secrets before posting

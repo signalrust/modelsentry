@@ -1,0 +1,18 @@
+[package]
+name = "modelsentry-common"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+redb.workspace = true
+secrecy.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true
