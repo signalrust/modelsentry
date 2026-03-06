@@ -25,6 +25,7 @@ use std::{path::Path, sync::Arc};
 use redb::{Database, TableDefinition};
 
 use modelsentry_common::error::{ModelSentryError, Result};
+use modelsentry_common::types::ProbeId;
 
 // Pre-declare all tables so that a fresh database has them after `open()`.
 const PROBES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("probes");
@@ -77,6 +78,23 @@ impl AppStore {
     #[must_use]
     pub fn alerts(&self) -> AlertRuleStore {
         AlertRuleStore::new(Arc::clone(&self.db))
+    }
+
+    /// Delete a probe and all its associated runs and baselines atomically.
+    ///
+    /// Returns `false` if the probe was not found (no partial work is done).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelSentryError::Db`] or [`ModelSentryError::Serialization`].
+    pub fn delete_probe_cascade(&self, id: &ProbeId) -> Result<bool> {
+        let found = self.probes().delete(id)?;
+        if !found {
+            return Ok(false);
+        }
+        self.runs().delete_for_probe(id)?;
+        self.baselines().delete_for_probe(id)?;
+        Ok(true)
     }
 
     /// Eagerly create all tables so that read transactions never encounter

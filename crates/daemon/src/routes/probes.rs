@@ -87,7 +87,7 @@ async fn delete_probe(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let probe_id = parse_probe_id(&id)?;
-    let found = state.store.probes().delete(&probe_id)?;
+    let found = state.store.delete_probe_cascade(&probe_id)?;
     if found {
         Ok(StatusCode::NO_CONTENT)
     } else {

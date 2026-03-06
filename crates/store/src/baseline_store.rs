@@ -102,6 +102,56 @@ impl BaselineStore {
             .map_err(|e| ModelSentryError::Db(e.to_string()))?;
         Ok(existed)
     }
+
+    /// Delete all baselines associated with `probe_id`.
+    ///
+    /// Returns the number of records deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    pub fn delete_for_probe(&self, probe_id: &ProbeId) -> Result<usize> {
+        let ids_to_delete: Vec<String> = {
+            let read_txn = self
+                .db
+                .begin_read()
+                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
+                .open_table(TABLE)
+                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut ids = Vec::new();
+            for entry in table.iter()? {
+                let (k, v) = entry?;
+                let b: BaselineSnapshot = serde_json::from_slice(v.value())?;
+                if &b.probe_id == probe_id {
+                    ids.push(k.value().to_owned());
+                }
+            }
+            ids
+        };
+
+        let count = ids_to_delete.len();
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        {
+            let mut table = write_txn
+                .open_table(TABLE)
+                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            for id in &ids_to_delete {
+                table.remove(id.as_str())?;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        Ok(count)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
