@@ -6,12 +6,19 @@ license-file.workspace = true
 
 [dependencies]
 modelsentry-common = { path = "../common" }
+async-trait.workspace = true
 chrono.workspace = true
+reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+mockall.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true
