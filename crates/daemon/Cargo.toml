@@ -10,18 +10,27 @@ modelsentry-core = { path = "../core" }
 modelsentry-store = { path = "../store" }
 age.workspace = true
 anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+tower = { version = "0.5", features = ["timeout"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+axum-test = "19"
 chrono.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 uuid.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true

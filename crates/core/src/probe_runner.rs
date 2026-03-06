@@ -31,6 +31,12 @@ impl ProbeRunner {
         Self { provider }
     }
 
+    /// Returns `true` if the backing provider supports embeddings.
+    #[must_use]
+    pub fn has_embeddings(&self) -> bool {
+        self.provider.embedding_dim() > 0
+    }
+
     /// Execute all prompts concurrently, collecting embeddings **and** completions.
     ///
     /// At most `concurrency` prompts are in-flight simultaneously (minimum 1
