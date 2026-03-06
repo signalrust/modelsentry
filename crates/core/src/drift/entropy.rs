@@ -149,7 +149,7 @@ mod tests {
         );
     }
 
-    /// entropy_delta is independent of which side is higher (absolute value).
+    /// `entropy_delta` is independent of which side is higher (absolute value).
     #[test]
     fn entropy_delta_is_symmetric() {
         let high_entropy = vec![vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()]];

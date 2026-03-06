@@ -335,7 +335,7 @@ mod tests {
     }
 
     /// Run where cosine direction drifts (embeddings pointing differently)
-    /// but norms are equal — verifies cosine path is exercised in compute().
+    /// but norms are equal — verifies cosine path is exercised in `compute()`.
     #[test]
     fn cosine_driven_drift_produces_nonzero_cosine_in_report() {
         let probe_id = ProbeId::new();

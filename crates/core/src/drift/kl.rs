@@ -160,7 +160,7 @@ mod tests {
         assert!(normalize(&[0.0, 0.0, 0.0]).is_err());
     }
 
-    /// D_KL(p||q) for p=[0.5,0.5], q=[0.75,0.25].
+    /// `D_KL(p||q)` for p=[0.5,0.5], q=[0.75,0.25].
     /// Hand-computed: 0.5*ln(2/3) + 0.5*ln(2) ≈ 0.1438
     #[test]
     fn kl_known_value() {
@@ -173,7 +173,7 @@ mod tests {
         );
     }
 
-    /// KL divergence is NOT symmetric: D_KL(p||q) ≠ D_KL(q||p).
+    /// KL divergence is NOT symmetric: `D_KL(p||q)` ≠ `D_KL(q||p)`.
     /// Catches any accidentally symmetrised implementation.
     #[test]
     fn kl_is_asymmetric() {
