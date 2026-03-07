@@ -11,31 +11,37 @@
     klThreshold?: number;
   } = $props();
 
-  let canvas: HTMLCanvasElement;
+  let canvas: HTMLCanvasElement = $state()!;
   let chart: Chart | null = null;
+
+  function getCSSVar(name: string): string {
+    if (typeof document === 'undefined') return '#3b82f6';
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#3b82f6';
+  }
 
   function buildChart() {
     if (!canvas) return;
 
-    // Sort runs oldest-first for the chart x-axis.
     const sorted = [...runs].sort(
       (a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime(),
     );
 
     const labels = sorted.map((r) =>
       new Date(r.started_at).toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
+        month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit',
       }),
     );
 
     const klValues = sorted.map((r) => r.drift_report?.kl_divergence ?? null);
     const cosineValues = sorted.map((r) => r.drift_report?.cosine_distance ?? null);
-
-    // Threshold reference line data (constant value across all points).
     const thresholdData = sorted.map(() => klThreshold);
+
+    const c1 = getCSSVar('--chart-1');
+    const c4 = getCSSVar('--chart-4');
+    const cDown = getCSSVar('--semantic-down');
+    const textMuted = getCSSVar('--text-muted');
+    const border = getCSSVar('--border');
 
     const config: ChartConfiguration = {
       type: 'line',
@@ -45,8 +51,8 @@
           {
             label: 'KL Divergence',
             data: klValues,
-            borderColor: '#3b82f6',
-            backgroundColor: 'rgba(59,130,246,0.08)',
+            borderColor: c1,
+            backgroundColor: c1 + '14',
             tension: 0.3,
             pointRadius: 4,
             fill: true,
@@ -55,7 +61,7 @@
           {
             label: 'Cosine Distance',
             data: cosineValues,
-            borderColor: '#8b5cf6',
+            borderColor: c4,
             backgroundColor: 'transparent',
             tension: 0.3,
             pointRadius: 3,
@@ -65,7 +71,7 @@
           {
             label: 'KL Threshold',
             data: thresholdData,
-            borderColor: '#ef4444',
+            borderColor: cDown,
             backgroundColor: 'transparent',
             borderDash: [6, 4],
             pointRadius: 0,
@@ -78,16 +84,26 @@
         maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { position: 'top' },
+          legend: {
+            position: 'top',
+            labels: { color: textMuted, font: { size: 11, family: 'IBM Plex Mono, monospace' } },
+          },
           tooltip: { enabled: true },
         },
         scales: {
           y: {
             beginAtZero: true,
-            title: { display: true, text: 'Score' },
+            title: { display: false },
+            grid: { color: border },
+            ticks: { color: textMuted, font: { size: 10, family: 'IBM Plex Mono, monospace' } },
           },
           x: {
-            ticks: { maxTicksLimit: 7 },
+            ticks: {
+              maxTicksLimit: 6,
+              color: textMuted,
+              font: { size: 10, family: 'IBM Plex Mono, monospace' },
+            },
+            grid: { color: border },
           },
         },
       },
@@ -97,58 +113,17 @@
     chart = new Chart(canvas, config);
   }
 
-  onMount(() => {
-    buildChart();
-  });
-
-  // Rebuild whenever runs change.
-  $effect(() => {
-    // Track reactive dependencies explicitly.
-    runs;
-    baseline;
-    buildChart();
-  });
-
-  onDestroy(() => {
-    chart?.destroy();
-  });
+  onMount(() => { buildChart(); });
+  $effect(() => { runs; baseline; buildChart(); });
+  onDestroy(() => { chart?.destroy(); });
 </script>
 
 <div class="chart-wrapper">
-  <p class="chart-title">Drift — {probeId}</p>
+  <p class="chart-title">DRIFT — {probeId}</p>
   {#if runs.length === 0}
-    <p class="empty">No runs yet.</p>
+    <p class="empty-state" style="padding: var(--sp-6) 0">No runs yet.</p>
   {:else}
-    <canvas bind:this={canvas}></canvas>
+    <canvas class="chart-canvas" bind:this={canvas}></canvas>
   {/if}
 </div>
 
-<style>
-  .chart-wrapper {
-    background: #fff;
-    border: 1px solid #e2e8f0;
-    border-radius: 0.75rem;
-    padding: 1rem 1.25rem;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
-  }
-
-  .chart-title {
-    margin: 0 0 0.75rem;
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #475569;
-  }
-
-  canvas {
-    height: 220px;
-    width: 100%;
-  }
-
-  .empty {
-    text-align: center;
-    color: #94a3b8;
-    font-size: 0.875rem;
-    padding: 2rem 0;
-    margin: 0;
-  }
-</style>

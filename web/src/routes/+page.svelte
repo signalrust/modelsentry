@@ -62,7 +62,6 @@
 
   onMount(async () => {
     try {
-      // Load probes + events in parallel first.
       const [fetchedProbes, fetchedEvents] = await Promise.all([
         api.probes.list(),
         api.alerts.listEvents(20),
@@ -70,7 +69,6 @@
       probes = fetchedProbes;
       events = fetchedEvents;
 
-      // Then load each probe's last 7 runs and latest baseline in parallel.
       const perProbe = await Promise.all(
         probes.map(async (p) => {
           const [runs, baseline] = await Promise.all([
@@ -97,192 +95,116 @@
   <title>ModelSentry — Dashboard</title>
 </svelte:head>
 
-<main>
-  <header>
-    <h1>ModelSentry</h1>
-    <p class="subtitle">LLM Drift Detection Dashboard</p>
-  </header>
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-subtitle">LLM drift detection at a glance</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-primary btn-sm" href="/probes">Manage Probes →</a>
+  </div>
+</div>
 
-  {#if loading}
-    <p class="status-msg">Loading…</p>
-  {:else if error}
-    <p class="error-msg">Failed to load dashboard: {error}</p>
+{#if loading}
+  <p class="loading-state">Loading…</p>
+{:else if error}
+  <div class="error-banner">Failed to load dashboard: {error}</div>
+{:else}
+  <!-- KPI row -->
+  <div class="grid grid-4 section">
+    <SummaryCard title="Probes" value={totalProbes} status="neutral" />
+    <SummaryCard title="Last Run" value={lastRunLabel} status={lastRunStatus} />
+    <SummaryCard title="Active Alerts" value={activeAlerts} status={alertCardStatus} />
+    <SummaryCard title="High Drift" value={highDriftProbes} status={highDriftProbes > 0 ? 'error' : 'ok'} />
+  </div>
+
+  <!-- Drift charts -->
+  {#if probes.length === 0}
+    <div class="empty-state">
+      No probes configured yet.
+      <a href="/probes" class="btn btn-primary btn-sm" style="margin-left:var(--sp-3)">Add a probe →</a>
+    </div>
   {:else}
-    <!-- Summary cards -->
-    <section class="cards">
-      <SummaryCard title="Probes" value={totalProbes} status="neutral" />
-      <SummaryCard title="Last Run" value={lastRunLabel} status={lastRunStatus} />
-      <SummaryCard
-        title="Active Alerts"
-        value={activeAlerts}
-        status={alertCardStatus}
-      />
-      <SummaryCard
-        title="High Drift"
-        value={highDriftProbes}
-        status={highDriftProbes > 0 ? 'error' : 'ok'}
-      />
-    </section>
-
-    <!-- Drift charts — one per probe -->
-    {#if probes.length === 0}
-      <p class="empty">No probes configured yet. <a href="/probes">Add one →</a></p>
-    {:else}
-      <section class="charts">
+    <div class="section">
+      <div class="section">
+        <h2>Drift Charts</h2>
+      </div>
+      <div class="charts-grid">
         {#each probes as probe (probe.id)}
-          <DriftChart
-            probeId={probe.name}
-            runs={runsMap[probe.id] ?? []}
-            baseline={baselineMap[probe.id] ?? null}
-          />
+          <a class="chart-link" href="/probes/{probe.id}">
+            <DriftChart
+              probeId={probe.name}
+              runs={runsMap[probe.id] ?? []}
+              baseline={baselineMap[probe.id] ?? null}
+            />
+          </a>
         {/each}
-      </section>
-    {/if}
-
-    <!-- Recent alert events -->
-    {#if events.length > 0}
-      <section class="events">
-        <h2>Recent Alert Events</h2>
-        <ul>
-          {#each events.slice(0, 10) as event (event.id)}
-            <li class:acked={event.acknowledged}>
-              <span class="event-time">{new Date(event.fired_at).toLocaleString()}</span>
-              <span class="event-level" data-level={event.drift_report.drift_level}>
-                {event.drift_report.drift_level}
-              </span>
-              <span class="event-kl">KL {event.drift_report.kl_divergence.toFixed(3)}</span>
-              {#if event.acknowledged}
-                <span class="ack-badge">ack'd</span>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      </section>
-    {/if}
+      </div>
+    </div>
   {/if}
-</main>
+
+  <!-- Recent alert events -->
+  {#if events.length > 0}
+    <div class="section">
+      <h2>Recent Alert Events</h2>
+      <div class="card" style="padding: 0; overflow: hidden;">
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Drift Level</th>
+                <th>KL Divergence</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each events.slice(0, 10) as event (event.id)}
+                <tr class:acked={event.acknowledged}>
+                  <td class="td-meta">{new Date(event.fired_at).toLocaleString()}</td>
+                  <td>
+                    <span class="badge" data-level={event.drift_report.drift_level}>
+                      {event.drift_report.drift_level}
+                    </span>
+                  </td>
+                  <td class="td-num">{event.drift_report.kl_divergence.toFixed(3)}</td>
+                  <td>
+                    {#if event.acknowledged}
+                      <span class="badge badge-success">ack'd</span>
+                    {:else}
+                      <span class="badge badge-warning">pending</span>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  {/if}
+{/if}
 
 <style>
-  header {
-    margin-bottom: 2rem;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: 1.75rem;
-    font-weight: 800;
-    color: #0f172a;
-  }
-
-  .subtitle {
-    margin: 0.25rem 0 0;
-    color: #64748b;
-    font-size: 0.9rem;
-  }
-
-  .status-msg,
-  .error-msg,
-  .empty {
-    text-align: center;
-    padding: 3rem 0;
-    color: #64748b;
-  }
-
-  .error-msg {
-    color: #dc2626;
-  }
-
-  /* Summary cards row */
-  .cards {
-    display: flex;
-    gap: 1rem;
-    flex-wrap: wrap;
-    margin-bottom: 2rem;
-  }
-
-  /* Charts grid */
-  .charts {
+  .charts-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-    gap: 1.25rem;
-    margin-bottom: 2rem;
+    gap: var(--sp-4);
+    grid-template-columns: 1fr;
+  }
+  @media (min-width: 900px) {
+    .charts-grid { grid-template-columns: repeat(2, 1fr); }
   }
 
-  /* Events list */
-  .events h2 {
-    font-size: 1rem;
-    font-weight: 600;
-    margin: 0 0 0.75rem;
-    color: #0f172a;
+  .chart-link {
+    display: block;
+    text-decoration: none;
+    transition: transform var(--transition), box-shadow var(--transition);
+    border-radius: var(--r-md);
+  }
+  .chart-link:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-glow);
   }
 
-  .events ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .events li {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    background: #fff;
-    border: 1px solid #e2e8f0;
-    border-radius: 0.5rem;
-    padding: 0.6rem 1rem;
-    font-size: 0.875rem;
-  }
-
-  .events li.acked {
-    opacity: 0.55;
-  }
-
-  .event-time {
-    color: #64748b;
-    flex-shrink: 0;
-  }
-
-  .event-level {
-    font-weight: 700;
-    text-transform: uppercase;
-    font-size: 0.75rem;
-    padding: 0.15rem 0.5rem;
-    border-radius: 999px;
-    background: #e2e8f0;
-    color: #334155;
-  }
-
-  .event-level[data-level='high'],
-  .event-level[data-level='critical'] {
-    background: #fee2e2;
-    color: #dc2626;
-  }
-
-  .event-level[data-level='medium'] {
-    background: #fef3c7;
-    color: #d97706;
-  }
-
-  .event-level[data-level='low'] {
-    background: #dbeafe;
-    color: #2563eb;
-  }
-
-  .event-kl {
-    color: #475569;
-  }
-
-  .ack-badge {
-    margin-left: auto;
-    font-size: 0.7rem;
-    background: #dcfce7;
-    color: #16a34a;
-    border-radius: 999px;
-    padding: 0.1rem 0.5rem;
-    font-weight: 600;
-  }
+  tr.acked { opacity: 0.5; }
 </style>
-

@@ -9,3 +9,5 @@ web/build/
 .env
 .modelsentry/
 *.log
+# Reference-only legacy frontend — not part of the project
+frontend_legacy/

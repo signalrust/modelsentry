@@ -82,27 +82,33 @@ Write-Header "Starting backend daemon…"
 $DaemonExe  = Join-Path $Root "target\debug\modelsentry-daemon.exe"
 $DaemonArgs = @("--config", $Config)
 
-$DaemonEnv = [System.Collections.Generic.Dictionary[string,string]]::new()
+# Set env vars on THIS process so child processes inherit them automatically.
 if (-not [string]::IsNullOrEmpty($VaultPassphrase)) {
-    $DaemonEnv["MODELSENTRY_VAULT_PASSPHRASE"] = $VaultPassphrase
+    $env:MODELSENTRY_VAULT_PASSPHRASE = $VaultPassphrase
 }
-$DaemonEnv["RUST_LOG"] = if ($env:RUST_LOG) { $env:RUST_LOG } else { "info" }
+if (-not $env:RUST_LOG) { $env:RUST_LOG = "info" }
+
+$VaultFile = Join-Path $Root ".modelsentry\vault"
+if ((Test-Path $VaultFile)) {
+    Write-Warn "Existing vault found at $VaultFile."
+    Write-Info "If the passphrase is wrong the daemon will fail. Delete it to start fresh:"
+    Write-Info "  Remove-Item $VaultFile"
+}
 
 $DaemonProc = Start-Process -FilePath $DaemonExe `
     -ArgumentList $DaemonArgs `
     -WorkingDirectory $Root `
     -PassThru `
     -RedirectStandardOutput (Join-Path $Root ".modelsentry\daemon.stdout.log") `
-    -RedirectStandardError  (Join-Path $Root ".modelsentry\daemon.stderr.log") `
-    -Environment $DaemonEnv
+    -RedirectStandardError  (Join-Path $Root ".modelsentry\daemon.stderr.log")
 
 Write-Info "Daemon PID: $($DaemonProc.Id)  (logs → .modelsentry/daemon.*.log)"
 
 # ── start frontend ─────────────────────────────────────────────
 Write-Header "Starting frontend dev server…"
 
-$ViteProc = Start-Process -FilePath "npm" `
-    -ArgumentList "run", "dev" `
+$ViteProc = Start-Process -FilePath "cmd.exe" `
+    -ArgumentList "/c", "npm run dev" `
     -WorkingDirectory $WebDir `
     -PassThru `
     -RedirectStandardOutput (Join-Path $Root ".modelsentry\vite.stdout.log") `

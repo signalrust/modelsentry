@@ -95,11 +95,11 @@
   }
 </script>
 
-<div class="form-card">
+<div class="card form-card">
   <h2 class="form-title">New Probe</h2>
 
   {#if formError}
-    <p class="error-banner">{formError}</p>
+    <div class="error-banner form-error">{formError}</div>
   {/if}
 
   <form onsubmit={(e: Event) => { e.preventDefault(); handleSubmit(); }}>
@@ -148,7 +148,7 @@
 
     <!-- Schedule -->
     <div class="field">
-      <label>Schedule</label>
+      <p class="field-section-label">Schedule</p>
       <div class="radio-row">
         <label class="radio-label">
           <input type="radio" bind:group={scheduleKind} value="every_minutes" />
@@ -164,44 +164,48 @@
     {#if scheduleKind === 'every_minutes'}
       <div class="field field-inline">
         <label for="probe-minutes">Run every</label>
-        <input id="probe-minutes" type="number" min="1" max="10080" bind:value={everyMinutes} style="width:6rem" />
-        <span class="unit">minutes</span>
+        <input id="probe-minutes" type="number" min="1" max="10080" bind:value={everyMinutes} class="input-narrow" />
+        <span class="field-hint">minutes</span>
       </div>
     {:else}
       <div class="field">
-        <label for="probe-cron">Cron expression <span class="hint">(5-field: min hour dom month dow)</span></label>
+        <label for="probe-cron">Cron expression
+          <span class="field-hint"> (5-field: min hour dom month dow)</span>
+        </label>
         <input id="probe-cron" type="text" bind:value={cronExpression} placeholder="0 * * * *" />
       </div>
     {/if}
 
     <!-- Prompts -->
     <div class="field">
-      <div class="section-header">
-        <label>Prompts</label>
+      <div class="prompts-header">
+        <p class="field-section-label">Prompts</p>
         <button type="button" class="btn-add-prompt" onclick={addPrompt}>+ Add prompt</button>
       </div>
 
       {#each prompts as prompt, i}
         <div class="prompt-block">
-          <div class="prompt-header">
+          <div class="prompt-block-header">
             <span class="prompt-num">Prompt {i + 1}</span>
             {#if prompts.length > 1}
               <button type="button" class="btn-remove" onclick={() => removePrompt(i)}>Remove</button>
             {/if}
           </div>
-          <textarea
-            rows="3"
-            bind:value={prompt.text}
-            placeholder="Enter the prompt text sent to the model…"
-          ></textarea>
-          <div class="field-row expect-row">
-            <div class="field small">
-              <label>Must contain (optional)</label>
-              <input type="text" bind:value={prompt.expected_contains} placeholder="expected substring" />
+          <div class="field">
+            <textarea
+              rows="3"
+              bind:value={prompt.text}
+              placeholder="Enter the prompt text sent to the model…"
+            ></textarea>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="must-contains-{i}">Must contain <span class="field-hint">(optional)</span></label>
+              <input id="must-contains-{i}" type="text" bind:value={prompt.expected_contains} placeholder="expected substring" />
             </div>
-            <div class="field small">
-              <label>Must not contain (optional)</label>
-              <input type="text" bind:value={prompt.expected_not_contains} placeholder="forbidden substring" />
+            <div class="field">
+              <label for="must-not-contains-{i}">Must not contain <span class="field-hint">(optional)</span></label>
+              <input id="must-not-contains-{i}" type="text" bind:value={prompt.expected_not_contains} placeholder="forbidden substring" />
             </div>
           </div>
         </div>
@@ -210,10 +214,10 @@
 
     <!-- Actions -->
     <div class="form-actions">
-      <button type="button" class="btn-secondary" onclick={() => oncancel()} disabled={submitting}>
+      <button type="button" class="btn" onclick={() => oncancel()} disabled={submitting}>
         Cancel
       </button>
-      <button type="submit" class="btn-primary" disabled={submitting}>
+      <button type="submit" class="btn btn-primary" disabled={submitting}>
         {submitting ? 'Creating…' : 'Create Probe'}
       </button>
     </div>
@@ -221,245 +225,97 @@
 </div>
 
 <style>
-  .form-card {
-    background: #fff;
-    border: 1px solid #e2e8f0;
-    border-radius: 0.75rem;
-    padding: 1.75rem;
-    margin-bottom: 2rem;
-  }
+  .form-card { margin-bottom: var(--sp-6); }
 
   .form-title {
-    margin: 0 0 1.25rem;
-    font-size: 1.1rem;
+    font-size: var(--text-md);
     font-weight: 700;
-    color: #0f172a;
+    margin-bottom: var(--sp-4);
+    color: var(--text-primary);
+    font-family: var(--font-display);
   }
 
-  .error-banner {
-    background: #fef2f2;
-    border: 1px solid #fecaca;
-    color: #dc2626;
-    border-radius: 0.4rem;
-    padding: 0.6rem 0.9rem;
-    font-size: 0.875rem;
-    margin-bottom: 1rem;
-  }
-
-  .field {
-    margin-bottom: 1rem;
-  }
-
-  .field label {
-    display: block;
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #475569;
-    margin-bottom: 0.3rem;
-  }
-
-  .field input[type='text'],
-  .field input[type='number'],
-  .field select,
-  .field textarea {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 0.45rem 0.7rem;
-    border: 1px solid #cbd5e1;
-    border-radius: 0.4rem;
-    font-size: 0.875rem;
-    color: #0f172a;
-    background: #f8fafc;
-  }
-
-  .field input:focus,
-  .field select:focus,
-  .field textarea:focus {
-    outline: 2px solid #6366f1;
-    outline-offset: -1px;
-    background: #fff;
-  }
-
-  .field-row {
-    display: flex;
-    gap: 0.75rem;
-  }
-
-  .field-row .field {
-    flex: 1;
-  }
-
-  .field.small input {
-    font-size: 0.8rem;
-  }
+  .form-error { margin-bottom: var(--sp-4); }
 
   .field-inline {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--sp-2);
   }
+  .field-inline label { margin-bottom: 0; white-space: nowrap; }
+  .input-narrow { width: 7rem !important; }
 
-  .field-inline label {
-    margin: 0;
-    white-space: nowrap;
-  }
-
-  .unit {
-    font-size: 0.875rem;
-    color: #64748b;
-  }
-
-  .radio-row {
-    display: flex;
-    gap: 1.5rem;
-    margin-top: 0.2rem;
-  }
-
-  .radio-label {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: #334155;
-    cursor: pointer;
-  }
-
-  .hint {
-    font-weight: 400;
-    color: #94a3b8;
-    font-size: 0.75rem;
-  }
-
-  .section-header {
+  .prompts-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--sp-2);
   }
+  .prompts-header .field-section-label { margin-bottom: 0; }
 
-  .section-header label {
-    margin: 0;
+  .field-section-label {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin: 0 0 var(--sp-1);
+    font-family: var(--font-display);
   }
 
   .btn-add-prompt {
-    font-size: 0.8rem;
+    font-size: var(--text-xs);
     font-weight: 600;
-    color: #6366f1;
+    color: var(--accent);
     background: none;
     border: none;
     cursor: pointer;
+    font-family: var(--font-mono);
     padding: 0;
+    transition: opacity var(--transition);
   }
-
-  .btn-add-prompt:hover {
-    text-decoration: underline;
-  }
+  .btn-add-prompt:hover { opacity: 0.7; }
 
   .prompt-block {
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 0.5rem;
-    padding: 0.75rem;
-    margin-bottom: 0.75rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: var(--sp-3);
+    margin-bottom: var(--sp-3);
   }
+  .prompt-block .field { margin-bottom: var(--sp-2); }
+  .prompt-block .field:last-child { margin-bottom: 0; }
 
-  .prompt-header {
+  .prompt-block-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--sp-2);
   }
-
   .prompt-num {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: #64748b;
+    font-size: var(--text-xs);
+    font-weight: 700;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.08em;
+    font-family: var(--font-mono);
   }
-
   .btn-remove {
-    font-size: 0.78rem;
-    color: #ef4444;
+    font-size: var(--text-xs);
+    color: var(--semantic-down);
     background: none;
     border: none;
     cursor: pointer;
-    padding: 0;
+    font-family: var(--font-mono);
     font-weight: 600;
+    padding: 0;
   }
-
-  .btn-remove:hover {
-    text-decoration: underline;
-  }
-
-  .prompt-block textarea {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 0.45rem 0.7rem;
-    border: 1px solid #cbd5e1;
-    border-radius: 0.4rem;
-    font-size: 0.875rem;
-    color: #0f172a;
-    background: #fff;
-    resize: vertical;
-    margin-bottom: 0.5rem;
-  }
-
-  .prompt-block textarea:focus {
-    outline: 2px solid #6366f1;
-    outline-offset: -1px;
-  }
-
-  .expect-row {
-    margin-bottom: 0;
-  }
-
-  .expect-row .field {
-    margin-bottom: 0;
-  }
+  .btn-remove:hover { text-decoration: underline; }
 
   .form-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.75rem;
-    margin-top: 1.5rem;
-    padding-top: 1rem;
-    border-top: 1px solid #f1f5f9;
-  }
-
-  .btn-primary {
-    padding: 0.5rem 1.25rem;
-    background: #6366f1;
-    color: #fff;
-    border: none;
-    border-radius: 0.4rem;
-    font-size: 0.875rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: #4f46e5;
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-
-  .btn-secondary {
-    padding: 0.5rem 1.25rem;
-    background: #f1f5f9;
-    color: #334155;
-    border: 1px solid #e2e8f0;
-    border-radius: 0.4rem;
-    font-size: 0.875rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .btn-secondary:hover:not(:disabled) {
-    background: #e2e8f0;
+    gap: var(--sp-2);
+    margin-top: var(--sp-6);
+    padding-top: var(--sp-4);
+    border-top: 1px solid var(--border);
   }
 </style>
