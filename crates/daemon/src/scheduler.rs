@@ -37,8 +37,8 @@ pub fn new_registry() -> ProviderRegistry {
 pub struct Scheduler {
     store: Arc<AppStore>,
     providers: Arc<ProviderRegistry>,
-    calculator: DriftCalculator,
-    alert_engine: AlertEngine,
+    calculator: Arc<DriftCalculator>,
+    alert_engine: Arc<AlertEngine>,
 }
 
 /// Handle returned by [`Scheduler::start`].
@@ -56,8 +56,8 @@ impl Scheduler {
     pub fn new(
         store: Arc<AppStore>,
         providers: Arc<ProviderRegistry>,
-        calculator: DriftCalculator,
-        alert_engine: AlertEngine,
+        calculator: Arc<DriftCalculator>,
+        alert_engine: Arc<AlertEngine>,
     ) -> Self {
         Self {
             store,
@@ -80,8 +80,8 @@ impl Scheduler {
 
         let store = Arc::clone(&self.store);
         let providers = Arc::clone(&self.providers);
-        let calculator = Arc::new(self.calculator);
-        let alert_engine = Arc::new(self.alert_engine);
+        let calculator = Arc::clone(&self.calculator);
+        let alert_engine = Arc::clone(&self.alert_engine);
 
         let join_handle = tokio::spawn(async move {
             let probes = match store.probes().list_all() {
@@ -146,7 +146,16 @@ async fn run_probe_loop(
         tokio::time::sleep(sleep_until_next_run(&probe.schedule)).await;
 
         let key = provider_key(&probe.provider);
-        let provider = providers.read().ok().and_then(|g| g.get(&key).cloned());
+        let provider = match providers.read() {
+            Ok(guard) => guard.get(&key).cloned(),
+            Err(poisoned) => {
+                tracing::error!(
+                    probe_id = %probe.id,
+                    "scheduler: provider registry RwLock poisoned: {poisoned}",
+                );
+                continue;
+            }
+        };
         let Some(provider) = provider else {
             tracing::error!(
                 probe_id = %probe.id,
@@ -343,8 +352,8 @@ mod tests {
         Scheduler::new(
             store,
             registry,
-            DriftCalculator::new(0.5, 0.5).unwrap(),
-            AlertEngine::default(),
+            Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
+            Arc::new(AlertEngine::default()),
         )
     }
 
@@ -416,8 +425,8 @@ mod tests {
         let handle = Scheduler::new(
             store,
             Arc::new(new_registry()),
-            DriftCalculator::new(1.0, 1.0).unwrap(),
-            AlertEngine::default(),
+            Arc::new(DriftCalculator::new(1.0, 1.0).unwrap()),
+            Arc::new(AlertEngine::default()),
         )
         .start();
 

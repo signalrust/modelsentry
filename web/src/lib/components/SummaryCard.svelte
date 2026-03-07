@@ -1,7 +1,9 @@
 <script lang="ts">
-  export let title: string;
-  export let value: string | number;
-  export let status: 'ok' | 'warn' | 'error' | 'neutral' = 'neutral';
+  let { title, value, status = 'neutral' }: {
+    title: string;
+    value: string | number;
+    status?: 'ok' | 'warn' | 'error' | 'neutral';
+  } = $props();
 </script>
 
 <div class="card" class:ok={status === 'ok'} class:warn={status === 'warn'} class:error={status === 'error'}>

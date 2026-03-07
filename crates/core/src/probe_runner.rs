@@ -52,11 +52,6 @@ impl ProbeRunner {
     /// ratio: [`RunStatus::Success`], [`RunStatus::PartialFailure`], or
     /// [`RunStatus::Failed`].
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal semaphore is closed, which cannot occur under
-    /// normal usage.
-    ///
     /// # Errors
     ///
     /// This function does not currently return `Err`.
@@ -76,10 +71,14 @@ impl ProbeRunner {
                 let prov = Arc::clone(&self.provider);
                 let text = p.text.clone();
                 async move {
-                    let _permit = sem.acquire_owned().await.expect("semaphore closed");
+                    let _permit = sem.acquire_owned().await.map_err(|_| {
+                        modelsentry_common::error::ModelSentryError::Provider {
+                            message: "semaphore closed".to_string(),
+                        }
+                    })?;
                     let embed = prov.embed(std::slice::from_ref(&text)).await;
                     let complete = prov.complete(&text).await;
-                    (embed, complete)
+                    Ok::<_, modelsentry_common::error::ModelSentryError>((embed, complete))
                 }
             })
             .collect();
@@ -91,7 +90,13 @@ impl ProbeRunner {
         let mut completions = Vec::with_capacity(n);
         let mut failure_count: usize = 0;
 
-        for (embed_res, complete_res) in outcomes {
+        for outcome in outcomes {
+            let Ok((embed_res, complete_res)) = outcome else {
+                failure_count += 1;
+                embeddings.push(Vec::new());
+                completions.push(String::new());
+                continue;
+            };
             let (embedding, embed_ok) = match embed_res {
                 Ok(mut vecs) if !vecs.is_empty() => {
                     let raw = vecs.remove(0).as_slice().to_vec();
@@ -135,11 +140,6 @@ impl ProbeRunner {
     ///
     /// [`run`]: ProbeRunner::run
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal semaphore is closed, which cannot occur under
-    /// normal usage.
-    ///
     /// # Errors
     ///
     /// This function does not currently return `Err`.
@@ -159,7 +159,11 @@ impl ProbeRunner {
                 let prov = Arc::clone(&self.provider);
                 let text = p.text.clone();
                 async move {
-                    let _permit = sem.acquire_owned().await.expect("semaphore closed");
+                    let _permit = sem.acquire_owned().await.map_err(|_| {
+                        modelsentry_common::error::ModelSentryError::Provider {
+                            message: "semaphore closed".to_string(),
+                        }
+                    })?;
                     prov.complete(&text).await
                 }
             })

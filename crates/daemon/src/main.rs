@@ -72,10 +72,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(path = %config.database.path.display(), "store opened");
 
     // ── Vault ──────────────────────────────────────────────────────────────
-    let passphrase: SecretString = cli.vault_passphrase.map_or_else(
-        || SecretString::new(String::new().into()),
-        |s| SecretString::new(s.into()),
-    );
+    // Refuse to open an existing vault without a passphrase.
+    let passphrase: SecretString = match cli.vault_passphrase {
+        Some(s) => SecretString::new(s.into()),
+        None if config.vault.path.exists() => {
+            anyhow::bail!(
+                "Vault file exists at {} but MODELSENTRY_VAULT_PASSPHRASE is not set. \
+                 Set the environment variable or pass --vault-passphrase.",
+                config.vault.path.display()
+            );
+        }
+        None => {
+            tracing::warn!("no vault passphrase set — new vault will use an empty passphrase");
+            SecretString::new(String::new().into())
+        }
+    };
 
     let vault = if config.vault.path.exists() {
         Vault::open(&config.vault.path, passphrase)?
@@ -88,47 +99,58 @@ async fn main() -> anyhow::Result<()> {
     };
     let vault = Arc::new(vault);
 
-    // ── Core components ────────────────────────────────────────────────────
+    // ── Core components (shared via Arc) ───────────────────────────────────
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
     let calculator = Arc::new(DriftCalculator::new(
         config.alerts.drift_threshold_kl,
         config.alerts.drift_threshold_cos,
     )?);
-    let alert_engine = Arc::new(AlertEngine::new(
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?,
-    ));
+    let alert_engine = Arc::new(AlertEngine::new(http_client));
+
     // ── Providers — load API keys from vault ─────────────────────────────
     let provider_map = new_registry();
 
     // OpenAI
     match vault.get_key("openai") {
-        Ok(Some(key)) => match OpenAiProvider::new(key, "gpt-4o") {
-            Ok(p) => {
-                provider_map
-                    .write()
-                    .unwrap()
-                    .insert("openai".to_string(), Arc::new(p));
-                tracing::info!("provider registered: openai");
+        Ok(Some(key)) => {
+            match OpenAiProvider::new(key, &config.providers.openai.model) {
+                Ok(p) => {
+                    let p = p
+                        .with_base_url(config.providers.openai.base_url.clone())
+                        .with_embedding_model(
+                            &config.providers.openai.embedding_model,
+                            config.providers.openai.embedding_dim,
+                        );
+                    provider_map
+                        .write()
+                        .expect("provider registry poisoned")
+                        .insert("openai".to_string(), Arc::new(p));
+                    tracing::info!("provider registered: openai");
+                }
+                Err(e) => tracing::warn!("failed to initialise OpenAI provider: {e}"),
             }
-            Err(e) => tracing::warn!("failed to initialise OpenAI provider: {e}"),
-        },
+        }
         Ok(None) => tracing::debug!("no 'openai' key in vault — openai provider not registered"),
         Err(e) => tracing::warn!("vault error reading 'openai' key: {e}"),
     }
 
     // Anthropic
     match vault.get_key("anthropic") {
-        Ok(Some(key)) => match AnthropicProvider::new(key, "claude-3-7-sonnet-20250219") {
-            Ok(p) => {
-                provider_map
-                    .write()
-                    .unwrap()
-                    .insert("anthropic".to_string(), Arc::new(p));
-                tracing::info!("provider registered: anthropic");
+        Ok(Some(key)) => {
+            match AnthropicProvider::new(key, &config.providers.anthropic.model) {
+                Ok(p) => {
+                    let p = p.with_base_url(config.providers.anthropic.base_url.clone());
+                    provider_map
+                        .write()
+                        .expect("provider registry poisoned")
+                        .insert("anthropic".to_string(), Arc::new(p));
+                    tracing::info!("provider registered: anthropic");
+                }
+                Err(e) => tracing::warn!("failed to initialise Anthropic provider: {e}"),
             }
-            Err(e) => tracing::warn!("failed to initialise Anthropic provider: {e}"),
-        },
+        }
         Ok(None) => {
             tracing::debug!("no 'anthropic' key in vault — anthropic provider not registered");
         }
@@ -137,22 +159,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Ollama (no API key — just needs base_url stored as the 'key' value)
     // Convention: store the base URL as the vault value for provider id 'ollama'.
-    // Falls back to the default localhost URL if no entry exists.
+    // Falls back to config default if no entry exists.
     {
         let base_url = match vault.get_key("ollama") {
             Ok(Some(key)) => key.expose().to_string(),
-            _ => "http://localhost:11434".to_string(),
+            _ => config.providers.ollama.base_url.clone(),
         };
-        // Vault key "ollama:model" lets you set the model without touching source.
         let ollama_model = match vault.get_key("ollama:model") {
             Ok(Some(key)) => key.expose().to_string(),
-            _ => "llama3".to_string(),
+            _ => config.providers.ollama.model.clone(),
         };
         match OllamaProvider::new(ollama_model.clone(), base_url.clone()) {
             Ok(p) => {
                 provider_map
                     .write()
-                    .unwrap()
+                    .expect("provider registry poisoned")
                     .insert(format!("ollama:{base_url}"), Arc::new(p));
                 tracing::info!(base_url = %base_url, model = %ollama_model, "provider registered: ollama");
             }
@@ -162,19 +183,19 @@ async fn main() -> anyhow::Result<()> {
 
     let providers = Arc::new(provider_map);
     tracing::info!(
-        registered = providers.read().unwrap().len(),
+        registered = providers
+            .read()
+            .expect("provider registry poisoned")
+            .len(),
         "provider registry built"
     );
 
-    // ── Scheduler ──────────────────────────────────────────────────────────
+    // ── Scheduler (shares same Arc'd calculator + alert engine) ────────────
     let scheduler = Scheduler::new(
         Arc::clone(&store),
         Arc::clone(&providers),
-        DriftCalculator::new(
-            config.alerts.drift_threshold_kl,
-            config.alerts.drift_threshold_cos,
-        )?,
-        AlertEngine::new(reqwest::Client::new()),
+        Arc::clone(&calculator),
+        Arc::clone(&alert_engine),
     );
     let _scheduler_handle = scheduler.start();
     tracing::info!("scheduler started");

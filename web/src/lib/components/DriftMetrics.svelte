@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { DriftReport, DriftLevel } from '$lib/types.js';
 
-  export let report: DriftReport;
+  let { report }: { report: DriftReport } = $props();
 
   const DRIFT_LABELS: Record<DriftLevel, string> = {
     none: 'None',

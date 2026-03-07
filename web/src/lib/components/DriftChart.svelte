@@ -4,16 +4,13 @@
   import 'chart.js/auto';
   import type { ProbeRun, BaselineSnapshot } from '$lib/types.js';
 
-  /** The probe name shown in the chart title. */
-  export let probeId: string;
-  /** Pre-fetched recent runs for this probe, newest-first. */
-  export let runs: ProbeRun[];
-  /** Active baseline — used to draw the threshold reference line. */
-  export let baseline: BaselineSnapshot | null;
-  /** KL threshold from the alert rule (drawn as a red dashed line). */
-  export let klThreshold: number = 0.5;
+  let { probeId, runs, baseline, klThreshold = 0.5 }: {
+    probeId: string;
+    runs: ProbeRun[];
+    baseline: BaselineSnapshot | null;
+    klThreshold?: number;
+  } = $props();
 
-  // Svelte 4 binding target
   let canvas: HTMLCanvasElement;
   let chart: Chart | null = null;
 
@@ -105,7 +102,12 @@
   });
 
   // Rebuild whenever runs change.
-  $: runs, baseline, buildChart();
+  $effect(() => {
+    // Track reactive dependencies explicitly.
+    runs;
+    baseline;
+    buildChart();
+  });
 
   onDestroy(() => {
     chart?.destroy();

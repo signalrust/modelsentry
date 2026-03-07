@@ -1,17 +1,18 @@
 <script lang="ts">
   import type { Probe, ProbeRun, DriftLevel } from '$lib/types.js';
 
-  export let probes: Probe[];
-  /** Latest run keyed by probe id. */
-  export let latestRunMap: Record<string, ProbeRun | null> = {};
+  let { probes, latestRunMap = {} }: {
+    probes: Probe[];
+    latestRunMap?: Record<string, ProbeRun | null>;
+  } = $props();
 
   // ---------------------------------------------------------------------------
   // Sorting
   // ---------------------------------------------------------------------------
 
   type SortKey = 'name' | 'drift';
-  let sortKey: SortKey = 'name';
-  let sortAsc = true;
+  let sortKey: SortKey = $state('name');
+  let sortAsc = $state(true);
 
   const DRIFT_ORDER: Record<DriftLevel, number> = {
     none: 0,
@@ -34,7 +35,7 @@
     }
   }
 
-  $: sorted = [...probes].sort((a, b) => {
+  let sorted = $derived([...probes].sort((a, b) => {
     let cmp = 0;
     if (sortKey === 'name') {
       cmp = a.name.localeCompare(b.name);
@@ -42,7 +43,7 @@
       cmp = DRIFT_ORDER[driftOf(a.id)] - DRIFT_ORDER[driftOf(b.id)];
     }
     return sortAsc ? cmp : -cmp;
-  });
+  }));
 
   function scheduleLabel(probe: Probe): string {
     if (probe.schedule.kind === 'cron') return probe.schedule.expression;
@@ -62,14 +63,14 @@
       <thead>
         <tr>
           <th>
-            <button class="sort-btn" on:click={() => toggleSort('name')}>
+            <button class="sort-btn" onclick={() => toggleSort('name')}>
               Name {sortKey === 'name' ? (sortAsc ? '▲' : '▼') : ''}
             </button>
           </th>
           <th>Provider / Model</th>
           <th>Schedule</th>
           <th>
-            <button class="sort-btn" on:click={() => toggleSort('drift')}>
+            <button class="sort-btn" onclick={() => toggleSort('drift')}>
               Last Drift {sortKey === 'drift' ? (sortAsc ? '▲' : '▼') : ''}
             </button>
           </th>

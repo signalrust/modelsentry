@@ -54,6 +54,21 @@ async fn create_probe(
             message: "name must not be empty".to_string(),
         }));
     }
+    if body.model.trim().is_empty() {
+        return Err(AppError(ModelSentryError::Config {
+            message: "model must not be empty".to_string(),
+        }));
+    }
+    if body.prompts.is_empty() {
+        return Err(AppError(ModelSentryError::Config {
+            message: "prompts must not be empty".to_string(),
+        }));
+    }
+    if body.prompts.iter().any(|p| p.text.trim().is_empty()) {
+        return Err(AppError(ModelSentryError::Config {
+            message: "each prompt text must not be empty".to_string(),
+        }));
+    }
     let now = Utc::now();
     let probe = Probe {
         id: ProbeId::new(),
@@ -112,7 +127,11 @@ async fn trigger_probe_run(
     let provider = state
         .providers
         .read()
-        .unwrap()
+        .map_err(|e| {
+            AppError(ModelSentryError::Config {
+                message: format!("provider registry poisoned: {e}"),
+            })
+        })?
         .get(&provider_key)
         .cloned()
         .ok_or_else(|| {
@@ -199,12 +218,15 @@ mod tests {
 
     fn make_config() -> modelsentry_common::config::AppConfig {
         use modelsentry_common::config::{
-            AlertsConfig, DatabaseConfig, SchedulerConfig, ServerConfig, VaultConfig,
+            AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig,
+            ServerConfig, VaultConfig,
         };
         modelsentry_common::config::AppConfig {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 7740,
+                timeout_secs: 30,
+                cors_origin: "http://localhost:5173".to_string(),
             },
             vault: VaultConfig {
                 path: std::path::PathBuf::from("/tmp/vault.age"),
@@ -219,6 +241,8 @@ mod tests {
                 drift_threshold_kl: 0.5,
                 drift_threshold_cos: 0.5,
             },
+            providers: ProvidersConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 
@@ -287,6 +311,51 @@ mod tests {
             "provider": { "kind": "anthropic" },
             "model": "m",
             "prompts": [],
+            "schedule": { "kind": "every_minutes", "minutes": 60 }
+        });
+        let resp = server.post("/probes").json(&bad).await;
+        resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_probe_with_empty_model_returns_422() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let bad = json!({
+            "name": "test",
+            "provider": { "kind": "anthropic" },
+            "model": "  ",
+            "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping", "expected_contains": null, "expected_not_contains": null }],
+            "schedule": { "kind": "every_minutes", "minutes": 60 }
+        });
+        let resp = server.post("/probes").json(&bad).await;
+        resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_probe_with_empty_prompts_returns_422() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let bad = json!({
+            "name": "test",
+            "provider": { "kind": "anthropic" },
+            "model": "m",
+            "prompts": [],
+            "schedule": { "kind": "every_minutes", "minutes": 60 }
+        });
+        let resp = server.post("/probes").json(&bad).await;
+        resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_probe_with_blank_prompt_text_returns_422() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let bad = json!({
+            "name": "test",
+            "provider": { "kind": "anthropic" },
+            "model": "m",
+            "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "  ", "expected_contains": null, "expected_not_contains": null }],
             "schedule": { "kind": "every_minutes", "minutes": 60 }
         });
         let resp = server.post("/probes").json(&bad).await;

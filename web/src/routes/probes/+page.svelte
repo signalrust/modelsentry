@@ -5,11 +5,11 @@
   import ProbeTable from '$lib/components/ProbeTable.svelte';
   import AddProbeForm from '$lib/components/AddProbeForm.svelte';
 
-  let probes: Probe[] = [];
-  let latestRunMap: Record<string, ProbeRun | null> = {};
-  let loading = true;
-  let error: string | null = null;
-  let showForm = false;
+  let probes: Probe[] = $state([]);
+  let latestRunMap: Record<string, ProbeRun | null> = $state({});
+  let loading = $state(true);
+  let error: string | null = $state(null);
+  let showForm = $state(false);
 
   onMount(async () => {
     try {
@@ -30,9 +30,9 @@
     }
   });
 
-  function onProbeCreated(event: CustomEvent<Probe>) {
-    probes = [event.detail, ...probes];
-    latestRunMap = { [event.detail.id]: null, ...latestRunMap };
+  function onProbeCreated(probe: Probe) {
+    probes = [probe, ...probes];
+    latestRunMap = { [probe.id]: null, ...latestRunMap };
     showForm = false;
   }
 </script>
@@ -49,7 +49,7 @@
         <p class="subtitle">All configured LLM probes</p>
       </div>
       <div class="header-actions">
-        <button class="btn-new" on:click={() => (showForm = !showForm)}>
+        <button class="btn-new" onclick={() => (showForm = !showForm)}>
           {showForm ? '✕ Cancel' : '+ New Probe'}
         </button>
         <a class="btn-back" href="/">← Dashboard</a>
@@ -58,7 +58,7 @@
   </header>
 
   {#if showForm}
-    <AddProbeForm on:created={onProbeCreated} on:cancel={() => (showForm = false)} />
+    <AddProbeForm oncreated={onProbeCreated} oncancel={() => (showForm = false)} />
   {/if}
 
   {#if loading}

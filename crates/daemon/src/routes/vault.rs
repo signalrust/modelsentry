@@ -21,7 +21,7 @@ use axum::{
     http::StatusCode,
     routing::{get, put},
 };
-use modelsentry_common::{error::ModelSentryError, types::ApiKey};
+use modelsentry_common::{config::AppConfig, error::ModelSentryError, types::ApiKey};
 use modelsentry_core::provider::{
     DynProvider, anthropic::AnthropicProvider, ollama::OllamaProvider, openai::OpenAiProvider,
 };
@@ -100,13 +100,14 @@ async fn upsert_key(
 
     // Construct and register the provider in the live registry so the
     // change takes effect immediately without a restart.
-    let dyn_provider: Option<DynProvider> = build_provider(&provider_id, api_key, &body)
-        .transpose()
-        .map_err(|e| {
-            AppError(ModelSentryError::Config {
-                message: format!("key saved but provider init failed: {e}"),
-            })
-        })?;
+    let dyn_provider: Option<DynProvider> =
+        build_provider(&provider_id, api_key, &body, &state.config)
+            .transpose()
+            .map_err(|e| {
+                AppError(ModelSentryError::Config {
+                    message: format!("key saved but provider init failed: {e}"),
+                })
+            })?;
 
     if let Some(p) = dyn_provider {
         // Use the same registry-key convention as provider_key() in the scheduler
@@ -122,7 +123,11 @@ async fn upsert_key(
         } else {
             provider_id.clone()
         };
-        state.providers.write().unwrap().insert(registry_key, p);
+        state.providers.write().map_err(|e| {
+            AppError(ModelSentryError::Config {
+                message: format!("provider registry poisoned: {e}"),
+            })
+        })?.insert(registry_key, p);
         tracing::info!(provider = %provider_id, "provider registered via vault API");
     } else {
         tracing::info!(
@@ -173,7 +178,11 @@ async fn delete_key(
         } else {
             provider_id.clone()
         };
-        state.providers.write().unwrap().remove(&registry_key);
+        state.providers.write().map_err(|e| {
+            AppError(ModelSentryError::Config {
+                message: format!("provider registry poisoned: {e}"),
+            })
+        })?.remove(&registry_key);
         tracing::info!(provider = %provider_id, "provider removed via vault API");
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -194,32 +203,50 @@ fn build_provider(
     provider_id: &str,
     key: ApiKey,
     body: &UpsertKeyRequest,
+    config: &AppConfig,
 ) -> Option<modelsentry_common::error::Result<DynProvider>> {
     match provider_id {
         "openai" => {
-            let model = body.model.as_deref().unwrap_or("gpt-4o").to_string();
-            Some(OpenAiProvider::new(key, model).map(|p| Arc::new(p) as DynProvider))
+            let model = body
+                .model
+                .as_deref()
+                .unwrap_or(&config.providers.openai.model)
+                .to_string();
+            Some(OpenAiProvider::new(key, model).map(|p| {
+                let p = p
+                    .with_base_url(config.providers.openai.base_url.clone())
+                    .with_embedding_model(
+                        &config.providers.openai.embedding_model,
+                        config.providers.openai.embedding_dim,
+                    );
+                Arc::new(p) as DynProvider
+            }))
         }
         "anthropic" => {
             let model = body
                 .model
                 .as_deref()
-                .unwrap_or("claude-3-7-sonnet-20250219")
+                .unwrap_or(&config.providers.anthropic.model)
                 .to_string();
-            Some(AnthropicProvider::new(key, model).map(|p| Arc::new(p) as DynProvider))
+            Some(AnthropicProvider::new(key, model).map(|p| {
+                let p = p.with_base_url(config.providers.anthropic.base_url.clone());
+                Arc::new(p) as DynProvider
+            }))
         }
         id if id.starts_with("ollama") => {
-            // For Ollama the 'key' field holds the base URL (no API auth needed).
-            // Fall back to body.base_url then to localhost for compatibility.
             let key_str = key.expose().trim().to_string();
             let base_url = if key_str.is_empty() {
                 body.base_url
                     .clone()
-                    .unwrap_or_else(|| "http://localhost:11434".to_string())
+                    .unwrap_or_else(|| config.providers.ollama.base_url.clone())
             } else {
                 key_str
             };
-            let model = body.model.as_deref().unwrap_or("llama3").to_string();
+            let model = body
+                .model
+                .as_deref()
+                .unwrap_or(&config.providers.ollama.model)
+                .to_string();
             Some(OllamaProvider::new(model, base_url).map(|p| Arc::new(p) as DynProvider))
         }
         _ => None,

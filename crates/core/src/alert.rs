@@ -71,6 +71,8 @@ impl AlertEngine {
                 });
                 if let Err(e) = self.http_client.post(url).json(&body).send().await {
                     tracing::warn!("failed to fire webhook to {url}: {e}");
+                } else {
+                    tracing::info!("webhook fired successfully to {url}");
                 }
             }
             AlertChannel::Email { address } => {

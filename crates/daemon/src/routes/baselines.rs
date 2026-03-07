@@ -164,7 +164,7 @@ mod tests {
     use axum_test::TestServer;
     use chrono::Utc;
     use modelsentry_common::{
-        config::{AlertsConfig, DatabaseConfig, SchedulerConfig, ServerConfig, VaultConfig},
+        config::{AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig, ServerConfig, VaultConfig},
         models::{Probe, ProbeSchedule, ProviderKind},
     };
     use std::sync::Arc;
@@ -199,6 +199,8 @@ mod tests {
                 server: ServerConfig {
                     host: "127.0.0.1".to_string(),
                     port: 7740,
+                    timeout_secs: 30,
+                    cors_origin: "http://localhost:5173".to_string(),
                 },
                 vault: VaultConfig {
                     path: std::path::PathBuf::from("/tmp/vault.age"),
@@ -213,6 +215,8 @@ mod tests {
                     drift_threshold_kl: 0.5,
                     drift_threshold_cos: 0.5,
                 },
+                providers: ProvidersConfig::default(),
+                auth: AuthConfig::default(),
             }),
         };
         (vault_dir, TestServer::new(crate::routes::router(state)))

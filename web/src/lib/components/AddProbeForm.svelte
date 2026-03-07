@@ -1,25 +1,27 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
   import { api } from '$lib/api.js';
   import type { CreateProbeRequest, Probe, ProbePrompt, ProviderKind, ProbeSchedule } from '$lib/types.js';
 
-  const dispatch = createEventDispatcher<{ created: Probe; cancel: void }>();
+  let { oncreated, oncancel }: {
+    oncreated: (probe: Probe) => void;
+    oncancel: () => void;
+  } = $props();
 
   // ── Form state ────────────────────────────────────────────────────────────
-  let name = '';
-  let providerKind: 'open_ai' | 'anthropic' | 'ollama' | 'azure_open_ai' = 'open_ai';
-  let ollamaBaseUrl = 'http://localhost:11434';
-  let azureEndpoint = '';
-  let azureDeployment = '';
-  let model = 'gpt-4o';
-  let scheduleKind: 'every_minutes' | 'cron' = 'every_minutes';
-  let everyMinutes = 60;
-  let cronExpression = '0 * * * *';
-  let prompts: Array<{ text: string; expected_contains: string; expected_not_contains: string }> = [
+  let name = $state('');
+  let providerKind: 'open_ai' | 'anthropic' | 'ollama' | 'azure_open_ai' = $state('open_ai');
+  let ollamaBaseUrl = $state('http://localhost:11434');
+  let azureEndpoint = $state('');
+  let azureDeployment = $state('');
+  let model = $state('gpt-4o');
+  let scheduleKind: 'every_minutes' | 'cron' = $state('every_minutes');
+  let everyMinutes = $state(60);
+  let cronExpression = $state('0 * * * *');
+  let prompts: Array<{ text: string; expected_contains: string; expected_not_contains: string }> = $state([
     { text: '', expected_contains: '', expected_not_contains: '' },
-  ];
-  let submitting = false;
-  let formError: string | null = null;
+  ]);
+  let submitting = $state(false);
+  let formError: string | null = $state(null);
 
   const defaultModels: Record<string, string> = {
     open_ai: 'gpt-4o',
@@ -84,7 +86,7 @@
       };
 
       const probe = await api.probes.create(body);
-      dispatch('created', probe);
+      oncreated(probe);
     } catch (e) {
       formError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -100,7 +102,7 @@
     <p class="error-banner">{formError}</p>
   {/if}
 
-  <form on:submit|preventDefault={handleSubmit}>
+  <form onsubmit={(e: Event) => { e.preventDefault(); handleSubmit(); }}>
     <!-- Name -->
     <div class="field">
       <label for="probe-name">Name</label>
@@ -110,7 +112,7 @@
     <!-- Provider -->
     <div class="field">
       <label for="probe-provider">Provider</label>
-      <select id="probe-provider" bind:value={providerKind} on:change={onProviderKindChange}>
+      <select id="probe-provider" bind:value={providerKind} onchange={onProviderKindChange}>
         <option value="open_ai">OpenAI</option>
         <option value="anthropic">Anthropic</option>
         <option value="ollama">Ollama (self-hosted)</option>
@@ -176,7 +178,7 @@
     <div class="field">
       <div class="section-header">
         <label>Prompts</label>
-        <button type="button" class="btn-add-prompt" on:click={addPrompt}>+ Add prompt</button>
+        <button type="button" class="btn-add-prompt" onclick={addPrompt}>+ Add prompt</button>
       </div>
 
       {#each prompts as prompt, i}
@@ -184,7 +186,7 @@
           <div class="prompt-header">
             <span class="prompt-num">Prompt {i + 1}</span>
             {#if prompts.length > 1}
-              <button type="button" class="btn-remove" on:click={() => removePrompt(i)}>Remove</button>
+              <button type="button" class="btn-remove" onclick={() => removePrompt(i)}>Remove</button>
             {/if}
           </div>
           <textarea
@@ -208,7 +210,7 @@
 
     <!-- Actions -->
     <div class="form-actions">
-      <button type="button" class="btn-secondary" on:click={() => dispatch('cancel')} disabled={submitting}>
+      <button type="button" class="btn-secondary" onclick={() => oncancel()} disabled={submitting}>
         Cancel
       </button>
       <button type="submit" class="btn-primary" disabled={submitting}>

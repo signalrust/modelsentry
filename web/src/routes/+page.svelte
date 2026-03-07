@@ -9,22 +9,22 @@
   // State
   // ---------------------------------------------------------------------------
 
-  let probes: Probe[] = [];
-  let runsMap: Record<string, ProbeRun[]> = {};
-  let baselineMap: Record<string, BaselineSnapshot | null> = {};
-  let events: AlertEvent[] = [];
-  let loading = true;
-  let error: string | null = null;
+  let probes: Probe[] = $state([]);
+  let runsMap: Record<string, ProbeRun[]> = $state({});
+  let baselineMap: Record<string, BaselineSnapshot | null> = $state({});
+  let events: AlertEvent[] = $state([]);
+  let loading = $state(true);
+  let error: string | null = $state(null);
 
   // ---------------------------------------------------------------------------
   // Derived summary values
   // ---------------------------------------------------------------------------
 
-  $: totalProbes = probes.length;
+  let totalProbes = $derived(probes.length);
 
-  $: activeAlerts = events.filter((e) => !e.acknowledged).length;
+  let activeAlerts = $derived(events.filter((e) => !e.acknowledged).length);
 
-  $: lastRunStatus = (() => {
+  let lastRunStatus = $derived.by(() => {
     const allRuns = Object.values(runsMap).flat();
     if (allRuns.length === 0) return 'neutral' as const;
     const latest = allRuns.reduce((a, b) =>
@@ -33,28 +33,28 @@
     if (latest.status === 'success') return 'ok' as const;
     if (latest.status === 'partial_failure') return 'warn' as const;
     return 'error' as const;
-  })();
+  });
 
-  $: lastRunLabel = (() => {
+  let lastRunLabel = $derived.by(() => {
     const allRuns = Object.values(runsMap).flat();
     if (allRuns.length === 0) return '—';
     const latest = allRuns.reduce((a, b) =>
       new Date(a.started_at) > new Date(b.started_at) ? a : b,
     );
     return latest.status.replace('_', ' ');
-  })();
+  });
 
-  $: highDriftProbes = probes.filter((p) => {
+  let highDriftProbes = $derived(probes.filter((p) => {
     const runs = runsMap[p.id] ?? [];
     const level = runs[0]?.drift_report?.drift_level;
     return level === 'high' || level === 'critical';
-  }).length;
+  }).length);
 
-  $: alertCardStatus = (() => {
+  let alertCardStatus = $derived.by(() => {
     if (activeAlerts === 0) return 'ok' as const;
     if (highDriftProbes > 0) return 'error' as const;
     return 'warn' as const;
-  })();
+  });
 
   // ---------------------------------------------------------------------------
   // Data loading — all fetches in parallel

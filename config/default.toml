@@ -5,6 +5,11 @@
 [server]
 host = "127.0.0.1"
 port = 7740
+# Request timeout in seconds.
+timeout_secs = 30
+# Allowed CORS origin. Set to your frontend URL.
+# Use "*" to allow all origins (not recommended for production).
+cors_origin = "http://localhost:5173"
 
 [vault]
 # Encrypted API key store. Created on first run.
@@ -24,3 +29,35 @@ default_interval_minutes = 60
 drift_threshold_kl = 0.10
 # Cosine distance — recommended starting range: 0.10–0.25
 drift_threshold_cos = 0.15
+
+# --------------------------------------------------------------------------
+# Provider defaults — override model names, base URLs, and token limits.
+# API keys are stored in the encrypted vault, not in this file.
+# --------------------------------------------------------------------------
+
+[providers.openai]
+model = "gpt-4o"
+embedding_model = "text-embedding-3-small"
+embedding_dim = 1536
+base_url = "https://api.openai.com"
+max_tokens = 1024
+
+[providers.anthropic]
+model = "claude-sonnet-4-20250514"
+base_url = "https://api.anthropic.com"
+api_version = "2023-06-01"
+max_tokens = 1024
+
+[providers.ollama]
+model = "llama3"
+base_url = "http://localhost:11434"
+
+# --------------------------------------------------------------------------
+# Authentication — protect API endpoints with bearer-token / X-Api-Key auth.
+# --------------------------------------------------------------------------
+
+[auth]
+# Set to true to require authentication on all /api/ endpoints.
+enabled = false
+# List of accepted API keys (bearer tokens). At least one required when enabled.
+# api_keys = ["your-secret-key"]

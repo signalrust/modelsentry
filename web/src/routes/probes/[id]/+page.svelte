@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { page } from '$app/stores';
+  import { page } from '$app/state';
   import { api, ApiError } from '$lib/api.js';
   import type { Probe, ProbeRun, BaselineSnapshot, AlertEvent } from '$lib/types.js';
   import DriftMetrics from '$lib/components/DriftMetrics.svelte';
@@ -10,23 +10,23 @@
   // State
   // ---------------------------------------------------------------------------
 
-  let probe: Probe | null = null;
-  let runs: ProbeRun[] = [];
-  let baseline: BaselineSnapshot | null = null;
-  let events: AlertEvent[] = [];
-  let loading = true;
-  let error: string | null = null;
+  let probe: Probe | null = $state(null);
+  let runs: ProbeRun[] = $state([]);
+  let baseline: BaselineSnapshot | null = $state(null);
+  let events: AlertEvent[] = $state([]);
+  let loading = $state(true);
+  let error: string | null = $state(null);
 
   // Run-now state
-  let runningNow = false;
-  let runNowError: string | null = null;
-  let runNowResult: ProbeRun | null = null;
-  let toastVisible = false;
+  let runningNow = $state(false);
+  let runNowError: string | null = $state(null);
+  let runNowResult: ProbeRun | null = $state(null);
+  let toastVisible = $state(false);
 
-  $: probeId = $page.params.id as string;
+  let probeId = $derived(page.params.id as string);
 
-  $: latestRun = runNowResult ?? runs[0] ?? null;
-  $: latestReport = latestRun?.drift_report ?? null;
+  let latestRun = $derived(runNowResult ?? runs[0] ?? null);
+  let latestReport = $derived(latestRun?.drift_report ?? null);
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -120,7 +120,7 @@
 
       <button
         class="btn-run"
-        on:click={handleRunNow}
+        onclick={handleRunNow}
         disabled={runningNow || loading}
       >
         {runningNow ? 'Running…' : 'Run Now'}
