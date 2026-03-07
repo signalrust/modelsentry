@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Response, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::{BoxError, Router, routing::get};
+use axum::{BoxError, Json, Router, routing::get};
 use include_dir::{Dir, include_dir};
 use modelsentry_common::{
     config::AppConfig,
@@ -19,6 +19,11 @@ use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{routes, scheduler::ProviderRegistry, vault::Vault};
+
+/// `GET /health` — lightweight liveness probe for the daemon.
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "service": "modelsentry-daemon" }))
+}
 
 /// Compiled-in copy of the `SvelteKit` static build output.
 ///
@@ -108,6 +113,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .nest("/api", api)
+        .route("/health", get(health))
         // Serve the embedded SvelteKit dashboard for all non-API requests
         .route("/", get(serve_index))
         .route("/{*path}", get(serve_static))
