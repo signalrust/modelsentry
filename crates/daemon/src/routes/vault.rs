@@ -120,11 +120,15 @@ async fn upsert_key(
         } else {
             provider_id.clone()
         };
-        state.providers.write().map_err(|e| {
-            AppError(ModelSentryError::Config {
-                message: format!("provider registry poisoned: {e}"),
-            })
-        })?.insert(registry_key, p);
+        state
+            .providers
+            .write()
+            .map_err(|e| {
+                AppError(ModelSentryError::Config {
+                    message: format!("provider registry poisoned: {e}"),
+                })
+            })?
+            .insert(registry_key, p);
         tracing::info!(provider = %provider_id, "provider registered via vault API");
     } else {
         tracing::info!(
@@ -175,11 +179,15 @@ async fn delete_key(
         } else {
             provider_id.clone()
         };
-        state.providers.write().map_err(|e| {
-            AppError(ModelSentryError::Config {
-                message: format!("provider registry poisoned: {e}"),
-            })
-        })?.remove(&registry_key);
+        state
+            .providers
+            .write()
+            .map_err(|e| {
+                AppError(ModelSentryError::Config {
+                    message: format!("provider registry poisoned: {e}"),
+                })
+            })?
+            .remove(&registry_key);
         tracing::info!(provider = %provider_id, "provider removed via vault API");
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -227,8 +235,8 @@ mod tests {
 
     use crate::{scheduler::new_registry, server::AppState};
     use modelsentry_common::config::{
-        AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig,
-        ServerConfig, VaultConfig,
+        AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig, ServerConfig,
+        VaultConfig,
     };
     use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
     use modelsentry_store::AppStore;

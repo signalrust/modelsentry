@@ -11,10 +11,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use modelsentry_common::config::AppConfig;
-use modelsentry_core::{
-    alert::AlertEngine,
-    drift::calculator::DriftCalculator,
-};
+use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
 use modelsentry_daemon::{
     provider_factory::{self, ProviderOverrides},
     scheduler::{Scheduler, new_registry},
@@ -189,10 +186,7 @@ async fn main() -> anyhow::Result<()> {
 
     let providers = Arc::new(provider_map);
     tracing::info!(
-        registered = providers
-            .read()
-            .expect("provider registry poisoned")
-            .len(),
+        registered = providers.read().expect("provider registry poisoned").len(),
         "provider registry built"
     );
 

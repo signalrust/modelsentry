@@ -279,7 +279,9 @@ mod tests {
             .get("/api/probes")
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                "Bearer secret-key".parse::<axum::http::HeaderValue>().unwrap(),
+                "Bearer secret-key"
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
             )
             .await;
         resp.assert_status_ok();
@@ -307,7 +309,9 @@ mod tests {
             .get("/api/probes")
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                "Bearer wrong-key".parse::<axum::http::HeaderValue>().unwrap(),
+                "Bearer wrong-key"
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
             )
             .await;
         resp.assert_status(StatusCode::UNAUTHORIZED);

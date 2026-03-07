@@ -164,7 +164,10 @@ mod tests {
     use axum_test::TestServer;
     use chrono::Utc;
     use modelsentry_common::{
-        config::{AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig, ServerConfig, VaultConfig},
+        config::{
+            AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig,
+            ServerConfig, VaultConfig,
+        },
         models::{Probe, ProbeSchedule, ProviderKind},
     };
     use std::sync::Arc;

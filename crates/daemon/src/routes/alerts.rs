@@ -157,7 +157,8 @@ mod tests {
     use super::*;
     use axum_test::TestServer;
     use modelsentry_common::config::{
-        AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig, ServerConfig, VaultConfig,
+        AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig, ServerConfig,
+        VaultConfig,
     };
     use serde_json::json;
     use std::sync::Arc;

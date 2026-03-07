@@ -6,16 +6,9 @@
 
 use std::sync::Arc;
 
-use modelsentry_common::{
-    config::AppConfig,
-    error::Result,
-    types::ApiKey,
-};
+use modelsentry_common::{config::AppConfig, error::Result, types::ApiKey};
 use modelsentry_core::provider::{
-    DynProvider,
-    anthropic::AnthropicProvider,
-    ollama::OllamaProvider,
-    openai::OpenAiProvider,
+    DynProvider, anthropic::AnthropicProvider, ollama::OllamaProvider, openai::OpenAiProvider,
 };
 
 /// Optional overrides supplied by the caller (e.g. from a vault upsert
