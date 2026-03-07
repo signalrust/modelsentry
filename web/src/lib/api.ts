@@ -23,6 +23,9 @@ import type {
 const BASE_URL: string =
   import.meta.env.VITE_API_URL ?? 'http://localhost:7740/api';
 
+/** Optional API key for authenticated endpoints. Set via VITE_API_KEY. */
+const API_KEY: string | undefined = import.meta.env.VITE_API_KEY;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -136,9 +139,19 @@ async function request<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...Object.fromEntries(
+      Object.entries(init?.headers ?? {}).filter(([, v]) => v != null),
+    ),
+  };
+  if (API_KEY) {
+    headers['Authorization'] = `Bearer ${API_KEY}`;
+  }
+
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
     ...init,
+    headers,
   });
 
   if (!res.ok) {

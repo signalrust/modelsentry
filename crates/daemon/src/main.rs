@@ -14,9 +14,9 @@ use modelsentry_common::config::AppConfig;
 use modelsentry_core::{
     alert::AlertEngine,
     drift::calculator::DriftCalculator,
-    provider::{anthropic::AnthropicProvider, ollama::OllamaProvider, openai::OpenAiProvider},
 };
 use modelsentry_daemon::{
+    provider_factory::{self, ProviderOverrides},
     scheduler::{Scheduler, new_registry},
     server::{self, AppState},
     vault::Vault,
@@ -111,24 +111,20 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Providers — load API keys from vault ─────────────────────────────
     let provider_map = new_registry();
+    let no_overrides = ProviderOverrides::default();
 
     // OpenAI
     match vault.get_key("openai") {
         Ok(Some(key)) => {
-            match OpenAiProvider::new(key, &config.providers.openai.model) {
-                Ok(p) => {
-                    let p = p
-                        .with_base_url(config.providers.openai.base_url.clone())
-                        .with_embedding_model(
-                            &config.providers.openai.embedding_model,
-                            config.providers.openai.embedding_dim,
-                        );
+            match provider_factory::build_provider("openai", key, &no_overrides, &config) {
+                Ok(Some(p)) => {
                     provider_map
                         .write()
                         .expect("provider registry poisoned")
-                        .insert("openai".to_string(), Arc::new(p));
+                        .insert("openai".to_string(), p);
                     tracing::info!("provider registered: openai");
                 }
+                Ok(None) => {}
                 Err(e) => tracing::warn!("failed to initialise OpenAI provider: {e}"),
             }
         }
@@ -139,15 +135,15 @@ async fn main() -> anyhow::Result<()> {
     // Anthropic
     match vault.get_key("anthropic") {
         Ok(Some(key)) => {
-            match AnthropicProvider::new(key, &config.providers.anthropic.model) {
-                Ok(p) => {
-                    let p = p.with_base_url(config.providers.anthropic.base_url.clone());
+            match provider_factory::build_provider("anthropic", key, &no_overrides, &config) {
+                Ok(Some(p)) => {
                     provider_map
                         .write()
                         .expect("provider registry poisoned")
-                        .insert("anthropic".to_string(), Arc::new(p));
+                        .insert("anthropic".to_string(), p);
                     tracing::info!("provider registered: anthropic");
                 }
+                Ok(None) => {}
                 Err(e) => tracing::warn!("failed to initialise Anthropic provider: {e}"),
             }
         }
@@ -169,14 +165,24 @@ async fn main() -> anyhow::Result<()> {
             Ok(Some(key)) => key.expose().to_string(),
             _ => config.providers.ollama.model.clone(),
         };
-        match OllamaProvider::new(ollama_model.clone(), base_url.clone()) {
-            Ok(p) => {
+        let ollama_overrides = ProviderOverrides {
+            model: Some(ollama_model.clone()),
+            base_url: Some(base_url.clone()),
+        };
+        match provider_factory::build_provider(
+            "ollama",
+            modelsentry_common::types::ApiKey::new(base_url.clone()),
+            &ollama_overrides,
+            &config,
+        ) {
+            Ok(Some(p)) => {
                 provider_map
                     .write()
                     .expect("provider registry poisoned")
-                    .insert(format!("ollama:{base_url}"), Arc::new(p));
+                    .insert(format!("ollama:{base_url}"), p);
                 tracing::info!(base_url = %base_url, model = %ollama_model, "provider registered: ollama");
             }
+            Ok(None) => {}
             Err(e) => tracing::warn!("failed to initialise Ollama provider: {e}"),
         }
     }

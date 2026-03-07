@@ -191,6 +191,8 @@ While unlikely to trigger under normal usage, this panic crashes the daemon inst
 
 ## 5. Documentation Drift
 
+> **STATUS: ✅ RESOLVED** — All documentation drift in ARCHITECTURE.md has been corrected. Phantom files, unused dependencies, incorrect layout, and outdated security descriptions have all been fixed.
+
 ARCHITECTURE.md references files, dependencies, and features that don't exist in the actual codebase:
 
 ### Files Referenced but Missing
@@ -416,7 +418,7 @@ During this audit, the following changes were applied:
 
 | ID | Finding | Status | Resolution |
 |----|---------|--------|------------|
-| A1 | Vault re-encrypts on every operation | ⏳ Deferred | Low priority — acceptable for the small number of keys stored. |
+| A1 | Vault re-encrypts on every operation | ⏳ Deferred | Acceptable for the small number of keys stored (<10). |
 | A2 | Anthropic lacks URL override | ✅ **RESOLVED** | `AnthropicProvider` now calls `.with_base_url()` using `config.providers.anthropic.base_url`. |
 | A3 | Anthropic API version outdated | ✅ **RESOLVED** | API version now configurable via `config.providers.anthropic.api_version`. |
 | A4 | Semaphore panics in probe_runner | ✅ **RESOLVED** | `.expect("semaphore closed")` replaced with `.map_err()` returning `ModelSentryError::Provider`. Uses proper `let-else` pattern for outcome destructuring. |
@@ -430,15 +432,15 @@ All 13 hardcoded values from Section 6 moved to `config/default.toml` under `[pr
 | ID | Finding | Status | Resolution |
 |----|---------|--------|------------|
 | F1 | Svelte 4/5 syntax mixed | ✅ **RESOLVED** | All 8 Svelte component/page files converted to Svelte 5 runes: `$props()`, `$state()`, `$derived()`, `$derived.by()`, `$effect()`, `onclick`/`onsubmit`, callback props. |
-| F2 | No Tailwind CSS | ⏳ Deferred | Docs issue — plain CSS is intentional. ARCHITECTURE.md should be updated. |
-| F3 | No Error Boundaries | ⏳ Deferred | Enhancement for future iteration. |
-| F4 | No Loading States | ⏳ Deferred | Enhancement for future iteration. |
+| F2 | No Tailwind CSS | ✅ **RESOLVED** | ARCHITECTURE.md updated to remove all Tailwind references. Plain CSS is intentional. |
+| F3 | No Error Boundaries | ✅ **RESOLVED** | Added `+error.svelte` global error boundary with status code display and back-to-dashboard link. |
+| F4 | No Loading States | ✅ **RESOLVED** | All three page components already have `loading`/`error` state variables with loading spinners and error messages. |
 
 ### Best Practices — ALL RESOLVED
 
 | Rule | Status | Resolution |
 |------|--------|------------|
-| DRY (provider factory) | ✅ | `vault.rs` uses config-driven factory |
+| DRY (provider factory) | ✅ | Shared `provider_factory.rs` module used by both `main.rs` and `vault.rs` |
 | Single instantiation | ✅ | Arc-shared DriftCalculator + AlertEngine |
 | Error handling (.expect) | ✅ | `.map_err()` in probe_runner.rs |
 | Input validation | ✅ | Model, prompts, prompt text validated |
@@ -453,7 +455,8 @@ All 13 hardcoded values from Section 6 moved to `config/default.toml` under `[pr
 | Auth middleware | 5 tests | server.rs |
 | Probe validation | 3 tests | probes.rs |
 | Config validation | 2 tests | config.rs |
-| **Full workspace** | **185 tests** | **All passing** |
+| Vault route handlers | 7 tests | routes/vault.rs |
+| **Full workspace** | **192 tests** | **All passing** |
 
 ### Files Modified (20 files)
 
@@ -461,17 +464,20 @@ All 13 hardcoded values from Section 6 moved to `config/default.toml` under `[pr
 - `crates/common/src/config.rs` — ProvidersConfig, AuthConfig, ServerConfig expansion
 - `config/default.toml` — All new provider/auth/CORS/timeout sections
 - `crates/daemon/src/server.rs` — Auth middleware + CORS + timeout + 5 tests
-- `crates/daemon/src/main.rs` — Passphrase safety, Arc sharing, config-driven providers
+- `crates/daemon/src/main.rs` — Passphrase safety, Arc sharing, provider factory usage
+- `crates/daemon/src/provider_factory.rs` — NEW: shared provider construction module
 - `crates/daemon/src/scheduler.rs` — Arc types, RwLock poisoning handling
 - `crates/daemon/src/routes/probes.rs` — Validation + RwLock fix + 3 tests
-- `crates/daemon/src/routes/vault.rs` — Config-driven defaults + RwLock fix
+- `crates/daemon/src/routes/vault.rs` — Provider factory delegation + 7 route tests
 - `crates/daemon/src/routes/baselines.rs` — Test config update
 - `crates/daemon/src/routes/runs.rs` — Test config update
 - `crates/daemon/src/routes/alerts.rs` — Test config update
 - `crates/core/src/probe_runner.rs` — Semaphore safety + let-else
 - `crates/core/src/alert.rs` — Webhook success log
 
-**Frontend (8 files):**
+**Frontend (9 files):**
+- `web/src/lib/api.ts` — Auth header support (Bearer token via VITE_API_KEY)
+- `web/src/routes/+error.svelte` — NEW: global error boundary
 - `web/src/lib/components/SummaryCard.svelte` — Svelte 5
 - `web/src/lib/components/DriftMetrics.svelte` — Svelte 5
 - `web/src/lib/components/DriftChart.svelte` — Svelte 5
@@ -480,3 +486,6 @@ All 13 hardcoded values from Section 6 moved to `config/default.toml` under `[pr
 - `web/src/routes/+page.svelte` — Svelte 5
 - `web/src/routes/probes/+page.svelte` — Svelte 5
 - `web/src/routes/probes/[id]/+page.svelte` — Svelte 5
+
+**Documentation (1 file):**
+- `docs/ARCHITECTURE.md` — Fixed all documentation drift (removed phantom files/deps, updated workspace layout, tech stack, config example, routes, security section)

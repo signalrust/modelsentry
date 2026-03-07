@@ -83,22 +83,20 @@ modelsentry/
 │   │       │   ├── mod.rs      ← LlmProvider trait (async-trait)
 │   │       │   ├── openai.rs
 │   │       │   ├── anthropic.rs
-│   │       │   ├── ollama.rs
-│   │       │   └── azure.rs
+│   │       │   └── ollama.rs
 │   │       ├── drift/
 │   │       │   ├── mod.rs
+│   │       │   ├── calculator.rs ← DriftCalculator, DriftReport
 │   │       │   ├── kl.rs       ← kl_divergence(), gaussian_kl()
 │   │       │   ├── cosine.rs   ← cosine_distance(), centroid()
 │   │       │   └── entropy.rs  ← output_entropy()
 │   │       ├── probe_runner.rs ← ProbeRunner struct
-│   │       ├── baseline.rs     ← BaselineSnapshot, snapshot computation
-│   │       └── alert.rs        ← AlertEvaluator, threshold check
+│   │       └── alert.rs        ← AlertEngine, webhook firing
 │   │
 │   ├── store/                  ← persistence layer (redb)
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── db.rs           ← open_db(), migrations
+│   │       ├── lib.rs          ← AppStore, open_db()
 │   │       ├── probe_store.rs
 │   │       ├── baseline_store.rs
 │   │       ├── run_store.rs
@@ -108,9 +106,10 @@ modelsentry/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs
-│   │       ├── server.rs       ← axum router + state
-│   │       ├── scheduler.rs    ← tokio-cron-scheduler integration
-│   │       ├── vault.rs        ← encrypted API key management (age)
+│   │       ├── server.rs           ← axum router + auth middleware + state
+│   │       ├── scheduler.rs        ← tokio-cron-scheduler integration
+│   │       ├── vault.rs            ← encrypted API key management (age)
+│   │       ├── provider_factory.rs ← shared provider construction
 │   │       └── routes/
 │   │           ├── mod.rs
 │   │           ├── probes.rs
@@ -127,45 +126,40 @@ modelsentry/
 │               ├── baseline.rs ← baseline capture / diff / list
 │               └── alert.rs    ← alert list / ack
 │
-├── web/                        ← SvelteKit frontend
+├── web/                        ← SvelteKit frontend (Svelte 5 runes)
 │   ├── package.json
 │   ├── svelte.config.js
 │   ├── vite.config.ts
-│   ├── tailwind.config.ts
 │   ├── tsconfig.json
 │   └── src/
 │       ├── app.html
-│       ├── app.css
+│       ├── app.css             ← plain CSS (no Tailwind)
 │       ├── lib/
-│       │   ├── api.ts          ← typed fetch wrappers for REST API
-│       │   ├── types.ts        ← mirrors Rust models (generated or manual)
+│       │   ├── api.ts          ← typed fetch wrappers with auth support
+│       │   ├── types.ts        ← mirrors Rust models (manual)
 │       │   └── components/
+│       │       ├── AddProbeForm.svelte
 │       │       ├── DriftChart.svelte
+│       │       ├── DriftMetrics.svelte
 │       │       ├── ProbeTable.svelte
-│       │       ├── BaselineBadge.svelte
-│       │       └── AlertFeed.svelte
+│       │       └── SummaryCard.svelte
 │       └── routes/
 │           ├── +layout.svelte
+│           ├── +error.svelte          ← global error boundary
 │           ├── +page.svelte           ← dashboard overview
-│           ├── probes/
-│           │   ├── +page.svelte
-│           │   └── [id]/+page.svelte
-│           └── baselines/
-│               └── +page.svelte
+│           └── probes/
+│               ├── +page.svelte
+│               └── [id]/+page.svelte
 │
 ├── config/
 │   └── default.toml            ← example config; committed to repo
 │
-├── tests/
-│   └── integration/
-│       ├── probe_lifecycle.rs
-│       ├── drift_detection.rs
-│       └── alert_fire.rs
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── AUDIT_REPORT.md
+│   └── PROJECT_PLAN.md
 │
-└── .github/
-    └── workflows/
-        ├── ci.yml
-        └── release.yml
+└── Makefile                    ← dev shortcuts (check, test, run, fmt)
 ```
 
 ---
@@ -199,24 +193,20 @@ modelsentry/
 | `tokio-cron-scheduler` | 0.10 | Cron-style probe scheduling |
 | `uuid` | 1.x | ID generation (v4, features = ["v4", "serde"]) |
 | `chrono` | 0.4 | Timestamps (UTC only, serde feature) |
-| `indicatif` | 0.17 | Progress bars in CLI |
-| `insta` | 1.x | Snapshot testing for API responses |
 | `mockall` | 0.12 | Mock generation for `LlmProvider` in unit tests |
-| `testcontainers` | 0.15 | Integration test infrastructure |
+| `wiremock` | 0.6 | HTTP mock server for integration tests |
+| `tempfile` | 3.x | Temporary directories for test databases and vaults |
+| `include_dir` | 0.7 | Embed static web assets into daemon binary |
 
 ### Svelte Frontend
 
 | Package | Version | Purpose |
 |---|---|---|
-| `svelte` | 5.x | UI framework |
+| `svelte` | 5.x | UI framework (runes: `$state`, `$derived`, `$props`) |
 | `@sveltejs/kit` | 2.x | Full-stack framework (routing, SSR) |
 | `vite` | 7.x | Build tool |
-| `tailwindcss` | 3.x | Utility-first styling |
-| `chart.js` | 4.x | Drift score timeline charts |
-| `svelte-chartjs` | 2.x | Svelte wrapper for Chart.js |
-| `@tanstack/svelte-table` | 8.x | Probe run history table |
-| `svelte-sonner` | 1.x | Toast notifications for alerts |
-| `zod` | 3.x | API response validation |
+| `chart.js` | 4.x | Drift score timeline charts (used directly, no wrapper) |
+| `zod` | 4.x | API response validation |
 
 ### Tooling
 
@@ -344,6 +334,8 @@ ci: fmt-check lint test audit web-check
 [server]
 host = "127.0.0.1"
 port = 7740
+timeout_secs = 30
+cors_origin = "http://localhost:5173"
 
 [vault]
 path = ".modelsentry/vault"
@@ -355,8 +347,27 @@ path = ".modelsentry/store.redb"
 default_interval_minutes = 60
 
 [alerts]
-drift_threshold_kl = 0.1
+drift_threshold_kl = 0.10
 drift_threshold_cos = 0.15
+
+[providers.openai]
+model = "gpt-4o"
+embedding_model = "text-embedding-3-small"
+embedding_dim = 1536
+base_url = "https://api.openai.com"
+
+[providers.anthropic]
+model = "claude-sonnet-4-20250514"
+base_url = "https://api.anthropic.com"
+api_version = "2023-06-01"
+
+[providers.ollama]
+model = "llama3"
+base_url = "http://localhost:11434"
+
+[auth]
+enabled = false
+# api_keys = ["your-secret-key"]
 ```
 
 ---
@@ -383,10 +394,11 @@ drift_threshold_cos = 0.15
 - Zero file I/O, zero network calls
 - **Coverage target: 90%+ for `crates/core`**
 
-### Integration Tests (`tests/integration/`)
-- Test daemon HTTP routes via `axum::test` helpers (in-process, no real network)
+### Integration Tests (`crates/core/tests/`)
+- Test probe lifecycle, drift detection, and alert firing with mock providers
 - Test `crates/store` against a real `redb` database opened in `tempdir`
-- Use `testcontainers` only if a real external service is absolutely required
+- Route handler tests co-located in `#[cfg(test)]` modules in daemon route files
+- Vault encryption round-trip tests in `crates/daemon/src/vault.rs`
 - Must run in `cargo nextest` with no external setup
 
 ### Property-Based Tests (proptest)
@@ -396,10 +408,6 @@ drift_threshold_cos = 0.15
   - Cosine distance: `cosine_distance(v, v) == 0.0`
   - Cosine distance: range `[0.0, 1.0]`
   - Centroid: dimension preservation
-
-### Snapshot Tests (insta)
-- All API response JSON shapes tested with `insta::assert_json_snapshot!`
-- Run `cargo insta review` after intentional shape changes
 
 ### Benchmarks (criterion)
 - `crates/core/benches/drift_bench.rs` — benchmark all three drift functions at N=100, 500, 1000 embedding dims
@@ -656,8 +664,8 @@ These will be caught in code review if not caught by clippy:
 
 - **API keys**: never appear in logs, debug output, or error messages. Enforced by `secrecy::Secret`.
 - **Vault**: `age` file encryption with a key derived from a user-provided passphrase. Key is never stored on disk unencrypted.
-- **HTTP API**: no authentication in v1 (localhost-only binding). v2 will add bearer token.
+- **HTTP API**: authentication via `Authorization: Bearer <key>` or `X-Api-Key` header, configurable in `[auth]` config section. CORS origin is config-driven (defaults to `http://localhost:5173`).
 - **Input validation**: all API request bodies validated before processing. `serde` deserialization errors return `422 Unprocessable Entity`, never `500`.
-- **No `unsafe` in library crates**: enforced by `#![forbid(unsafe_code)]` in `crates/common`, `crates/core`, `crates/store`. `unsafe` is only permitted in `crates/daemon` if required by FFI, with a `SAFETY` comment on every block.
+- **No `unsafe` in any crate**: enforced by `[workspace.lints.rust] unsafe_code = "forbid"` inherited by all crates.
 - **Dependency audit**: `cargo audit` and `cargo deny` run on every CI push.
 - **TLS**: all outbound LLM API requests use `rustls-tls` (no `native-tls`). Reqwest default-features disabled.

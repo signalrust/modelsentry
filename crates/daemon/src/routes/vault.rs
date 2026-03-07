@@ -13,8 +13,6 @@
 //! | `PUT` | `/vault/keys/{provider}` | Store or replace a key |
 //! | `DELETE` | `/vault/keys/{provider}` | Remove a key |
 
-use std::sync::Arc;
-
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -22,12 +20,11 @@ use axum::{
     routing::{get, put},
 };
 use modelsentry_common::{config::AppConfig, error::ModelSentryError, types::ApiKey};
-use modelsentry_core::provider::{
-    DynProvider, anthropic::AnthropicProvider, ollama::OllamaProvider, openai::OpenAiProvider,
-};
+use modelsentry_core::provider::DynProvider;
 use serde::{Deserialize, Serialize};
 
 use super::AppError;
+use crate::provider_factory::{self, ProviderOverrides};
 use crate::server::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -205,50 +202,186 @@ fn build_provider(
     body: &UpsertKeyRequest,
     config: &AppConfig,
 ) -> Option<modelsentry_common::error::Result<DynProvider>> {
-    match provider_id {
-        "openai" => {
-            let model = body
-                .model
-                .as_deref()
-                .unwrap_or(&config.providers.openai.model)
-                .to_string();
-            Some(OpenAiProvider::new(key, model).map(|p| {
-                let p = p
-                    .with_base_url(config.providers.openai.base_url.clone())
-                    .with_embedding_model(
-                        &config.providers.openai.embedding_model,
-                        config.providers.openai.embedding_dim,
-                    );
-                Arc::new(p) as DynProvider
-            }))
+    let overrides = ProviderOverrides {
+        model: body.model.clone(),
+        base_url: body.base_url.clone(),
+    };
+    match provider_factory::build_provider(provider_id, key, &overrides, config) {
+        Ok(Some(p)) => Some(Ok(p)),
+        Ok(None) => None,
+        Err(e) => Some(Err(e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use axum_test::TestServer;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    use crate::{scheduler::new_registry, server::AppState};
+    use modelsentry_common::config::{
+        AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig,
+        ServerConfig, VaultConfig,
+    };
+    use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
+    use modelsentry_store::AppStore;
+
+    fn open_store() -> (TempDir, Arc<AppStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        (dir, Arc::new(AppStore::open(&path).unwrap()))
+    }
+
+    fn test_app(store: Arc<AppStore>) -> (TempDir, TestServer) {
+        let vault_dir = tempfile::tempdir().unwrap();
+        let vault_path = vault_dir.path().join("v.age");
+        let state = AppState {
+            store,
+            vault: Arc::new(
+                crate::vault::Vault::create(
+                    &vault_path,
+                    secrecy::SecretString::new("test".to_string().into()),
+                )
+                .unwrap(),
+            ),
+            providers: Arc::new(new_registry()),
+            calculator: Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
+            alert_engine: Arc::new(AlertEngine::default()),
+            config: Arc::new(make_config()),
+        };
+        let router = crate::routes::router(state);
+        (vault_dir, TestServer::new(router))
+    }
+
+    fn make_config() -> modelsentry_common::config::AppConfig {
+        modelsentry_common::config::AppConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 7740,
+                timeout_secs: 30,
+                cors_origin: "http://localhost:5173".to_string(),
+            },
+            vault: VaultConfig {
+                path: std::path::PathBuf::from("/tmp/vault.age"),
+            },
+            database: DatabaseConfig {
+                path: std::path::PathBuf::from("/tmp/modelsentry.db"),
+            },
+            scheduler: SchedulerConfig {
+                default_interval_minutes: 60,
+            },
+            alerts: AlertsConfig {
+                drift_threshold_kl: 0.5,
+                drift_threshold_cos: 0.5,
+            },
+            providers: ProvidersConfig::default(),
+            auth: AuthConfig::default(),
         }
-        "anthropic" => {
-            let model = body
-                .model
-                .as_deref()
-                .unwrap_or(&config.providers.anthropic.model)
-                .to_string();
-            Some(AnthropicProvider::new(key, model).map(|p| {
-                let p = p.with_base_url(config.providers.anthropic.base_url.clone());
-                Arc::new(p) as DynProvider
-            }))
-        }
-        id if id.starts_with("ollama") => {
-            let key_str = key.expose().trim().to_string();
-            let base_url = if key_str.is_empty() {
-                body.base_url
-                    .clone()
-                    .unwrap_or_else(|| config.providers.ollama.base_url.clone())
-            } else {
-                key_str
-            };
-            let model = body
-                .model
-                .as_deref()
-                .unwrap_or(&config.providers.ollama.model)
-                .to_string();
-            Some(OllamaProvider::new(model, base_url).map(|p| Arc::new(p) as DynProvider))
-        }
-        _ => None,
+    }
+
+    #[tokio::test]
+    async fn list_keys_returns_empty_initially() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let resp = server.get("/vault/keys").await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["providers"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn upsert_key_stores_and_registers_provider() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let resp = server
+            .put("/vault/keys/openai")
+            .json(&json!({ "key": "sk-test-key-12345" }))
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["provider"], "openai");
+        assert_eq!(body["status"], "stored");
+
+        // The key should now appear in list
+        let list = server.get("/vault/keys").await;
+        let body: serde_json::Value = list.json();
+        let providers = body["providers"].as_array().unwrap();
+        assert!(providers.iter().any(|p| p == "openai"));
+    }
+
+    #[tokio::test]
+    async fn upsert_key_rejects_empty_key_for_non_ollama() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let resp = server
+            .put("/vault/keys/openai")
+            .json(&json!({ "key": "  " }))
+            .await;
+        resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn delete_key_returns_error_for_absent_key() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let resp = server.delete("/vault/keys/nonexistent").await;
+        resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn upsert_then_delete_key_round_trip() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+
+        // Upsert
+        let resp = server
+            .put("/vault/keys/anthropic")
+            .json(&json!({ "key": "sk-anthropic-key" }))
+            .await;
+        resp.assert_status_ok();
+
+        // Delete
+        let resp = server.delete("/vault/keys/anthropic").await;
+        resp.assert_status(StatusCode::NO_CONTENT);
+
+        // List should be empty again
+        let list = server.get("/vault/keys").await;
+        let body: serde_json::Value = list.json();
+        assert_eq!(body["providers"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn upsert_ollama_allows_empty_key() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let resp = server
+            .put("/vault/keys/ollama")
+            .json(&json!({ "key": "", "base_url": "http://localhost:11434" }))
+            .await;
+        resp.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn upsert_unknown_provider_stores_key_without_registering() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let resp = server
+            .put("/vault/keys/custom-provider")
+            .json(&json!({ "key": "some-api-key" }))
+            .await;
+        resp.assert_status_ok();
+
+        // Key should be listed
+        let list = server.get("/vault/keys").await;
+        let body: serde_json::Value = list.json();
+        let providers = body["providers"].as_array().unwrap();
+        assert!(providers.iter().any(|p| p == "custom-provider"));
     }
 }
