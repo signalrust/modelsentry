@@ -32,7 +32,7 @@ futures = "0.3"
 age = { version = "0.11", features = ["armor"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 wiremock = "0.6"
-mockall = "0.13"
+mockall = "0.14"
 include_dir = "0.7"
 mime_guess = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
