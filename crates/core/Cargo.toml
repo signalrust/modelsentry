@@ -26,7 +26,7 @@ uuid.workspace = true
 wiremock.workspace = true
 modelsentry-store = { path = "../store" }
 tempfile = "3"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[bench]]
 name = "drift_bench"
