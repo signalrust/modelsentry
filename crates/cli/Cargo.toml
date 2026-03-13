@@ -15,7 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
-tabled = "0.17"
+tabled = "0.20"
 toml.workspace = true
 modelsentry-common = { path = "../common" }
 
