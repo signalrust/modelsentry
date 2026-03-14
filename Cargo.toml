@@ -37,7 +37,7 @@ include_dir = "0.7"
 mime_guess = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive", "env"] }
-cron = "0.12"
+cron = "0.15"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
