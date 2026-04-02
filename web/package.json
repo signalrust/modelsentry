@@ -19,7 +19,8 @@
     "vite": "^8.0.1"
   },
   "overrides": {
-    "cookie": "^0.7.2"
+    "cookie": "^0.7.2",
+    "typescript": "$typescript"
   },
   "dependencies": {
     "chart.js": "^4.5.1",
