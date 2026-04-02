@@ -1,0 +1,43 @@
+#!/bin/sh
+# Pre-push hook: full CI-equivalent checks (including security audits)
+# Runs before every push to prevent broken code reaching GitHub.
+
+set -e
+
+echo "==> pre-push: cargo fmt --check"
+cargo fmt --all -- --check || {
+    echo "ERROR: cargo fmt check failed."
+    exit 1
+}
+
+echo "==> pre-push: cargo clippy"
+cargo clippy --workspace --all-targets -- -D warnings || {
+    echo "ERROR: clippy found warnings."
+    exit 1
+}
+
+echo "==> pre-push: cargo test"
+cargo test --workspace || {
+    echo "ERROR: tests failed."
+    exit 1
+}
+
+echo "==> pre-push: cargo audit"
+cargo audit || {
+    echo "ERROR: cargo audit found vulnerabilities. Run 'cargo update' to fix."
+    exit 1
+}
+
+echo "==> pre-push: frontend checks"
+(cd web && npm run check && npm run build) || {
+    echo "ERROR: frontend check/build failed."
+    exit 1
+}
+
+echo "==> pre-push: npm audit"
+(cd web && npm audit --audit-level=high) || {
+    echo "ERROR: npm audit found high-severity vulnerabilities. Run 'cd web && npm audit fix'."
+    exit 1
+}
+
+echo "==> pre-push: all checks passed"

@@ -1,4 +1,8 @@
-.PHONY: check fmt fmt-check lint test audit web-install web-check ci
+.PHONY: check fmt fmt-check lint test audit web-install web-check web-audit ci setup
+
+setup:
+	git config core.hooksPath .githooks
+	@echo "Git hooks installed. Pre-commit and pre-push checks are now active."
 
 check:
 	cargo check --workspace --all-targets
@@ -24,4 +28,7 @@ web-install:
 web-check:
 	cd web && npm run check && npm run build
 
-ci: fmt-check lint test audit web-check
+web-audit:
+	cd web && npm audit --audit-level=high
+
+ci: fmt-check lint test audit web-check web-audit

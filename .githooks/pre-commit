@@ -1,0 +1,31 @@
+#!/bin/sh
+# Pre-commit hook: fast checks (formatting + lint)
+# Runs before every commit to catch obvious issues early.
+
+set -e
+
+echo "==> pre-commit: cargo fmt --check"
+cargo fmt --all -- --check || {
+    echo ""
+    echo "ERROR: cargo fmt check failed. Run 'cargo fmt --all' to fix."
+    exit 1
+}
+
+echo "==> pre-commit: cargo clippy"
+cargo clippy --workspace --all-targets -- -D warnings || {
+    echo ""
+    echo "ERROR: clippy found warnings. Fix them before committing."
+    exit 1
+}
+
+# Only run frontend checks if web/ files are staged
+if git diff --cached --name-only | grep -q '^web/'; then
+    echo "==> pre-commit: svelte-check"
+    (cd web && npm run check) || {
+        echo ""
+        echo "ERROR: svelte-check failed. Fix type errors before committing."
+        exit 1
+    }
+fi
+
+echo "==> pre-commit: all checks passed"
