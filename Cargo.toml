@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 axum = "0.8"
-redb = "3"
+redb = "4"
 secrecy = "0.10"
 toml = "1"
 proptest = "1"
