@@ -30,7 +30,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-axum-test = "19"
+axum-test = "20"
 chrono.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
