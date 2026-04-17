@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 axum = "0.8"
-redb = "3"
+redb = "4"
 secrecy = "0.10"
 toml = "1"
 proptest = "1"
@@ -37,7 +37,7 @@ include_dir = "0.7"
 mime_guess = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive", "env"] }
-cron = "0.15"
+cron = "0.16"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
