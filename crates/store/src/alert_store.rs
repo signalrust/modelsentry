@@ -138,7 +138,7 @@ impl AlertRuleStore {
             let event: AlertEvent = serde_json::from_slice(v.value())?;
             events.push(event);
         }
-        events.sort_by(|a, b| b.fired_at.cmp(&a.fired_at));
+        events.sort_by_key(|e| std::cmp::Reverse(e.fired_at));
         Ok(events.into_iter().take(limit).collect())
     }
 
