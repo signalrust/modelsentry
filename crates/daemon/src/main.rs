@@ -42,6 +42,9 @@ struct Cli {
     vault_passphrase: Option<String>,
 }
 
+/// HTTP timeout for the alert/webhook client.
+const ALERT_HTTP_TIMEOUT_SECS: u64 = 10;
+
 #[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -101,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Core components (shared via Arc) ───────────────────────────────────
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(ALERT_HTTP_TIMEOUT_SECS))
         .build()?;
     let calculator = Arc::new(DriftCalculator::new(
         config.alerts.drift_threshold_kl,

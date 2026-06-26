@@ -19,6 +19,8 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 const DEFAULT_EMBEDDING_DIM: usize = 1536;
 const DEFAULT_MAX_TOKENS: u32 = 1024;
+/// Per-request HTTP timeout for the chat/embeddings endpoints.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 // ── Public type ───────────────────────────────────────────────────────────────
 
@@ -54,7 +56,7 @@ impl OpenAiProvider {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build()
             .map_err(|e| ModelSentryError::Provider {
                 message: format!("failed to build HTTP client: {e}"),

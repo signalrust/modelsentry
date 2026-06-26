@@ -22,6 +22,8 @@ use crate::drift::Embedding;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 1024;
+/// Per-request HTTP timeout for the chat endpoint.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 // ── Public type ───────────────────────────────────────────────────────────────
 
@@ -54,7 +56,7 @@ impl AnthropicProvider {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build()
             .map_err(|e| ModelSentryError::Provider {
                 message: format!("failed to build HTTP client: {e}"),

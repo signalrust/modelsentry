@@ -17,6 +17,9 @@ use crate::drift::Embedding;
 
 #[allow(dead_code)]
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
+/// Per-request HTTP timeout. Longer than the cloud providers because local
+/// first-run generation on CPU can be slow.
+const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 // ── Public type ───────────────────────────────────────────────────────────────
 
@@ -50,7 +53,7 @@ impl OllamaProvider {
             });
         }
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build()
             .map_err(|e| ModelSentryError::Provider {
                 message: format!("failed to build HTTP client: {e}"),

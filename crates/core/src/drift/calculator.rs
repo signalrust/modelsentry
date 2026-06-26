@@ -14,6 +14,13 @@ use super::{Embedding, cosine, entropy, kl};
 /// norms (zero empirical variance).
 const SIGMA_FLOOR: f32 = 0.1;
 
+/// Drift-severity boundaries on the metric/threshold ratio. A breached metric
+/// escalates by how many multiples of its threshold it reaches:
+/// `[1, 2)` → `Low`, `[2, 4)` → `Medium`, `[4, 8)` → `High`, `≥ 8` → `Critical`.
+const DRIFT_RATIO_MEDIUM: f32 = 2.0;
+const DRIFT_RATIO_HIGH: f32 = 4.0;
+const DRIFT_RATIO_CRITICAL: f32 = 8.0;
+
 /// Composes KL divergence, cosine distance, and output entropy into a
 /// [`DriftReport`] for a single probe run against its baseline.
 pub struct DriftCalculator {
@@ -130,11 +137,11 @@ impl DriftCalculator {
         let kl_ratio = kl / self.kl_threshold;
         let cosine_ratio = cosine / self.cosine_threshold;
         let max_ratio = kl_ratio.max(cosine_ratio);
-        if max_ratio < 2.0 {
+        if max_ratio < DRIFT_RATIO_MEDIUM {
             DriftLevel::Low
-        } else if max_ratio < 4.0 {
+        } else if max_ratio < DRIFT_RATIO_HIGH {
             DriftLevel::Medium
-        } else if max_ratio < 8.0 {
+        } else if max_ratio < DRIFT_RATIO_CRITICAL {
             DriftLevel::High
         } else {
             DriftLevel::Critical
