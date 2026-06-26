@@ -4,6 +4,17 @@
 
 set -e
 
+# Windows (Git Bash) only: Git for Windows bundles its own mingw64 DLLs
+# (libgmp, zlib, libwinpthread) in C:\Program Files\Git\mingw64\bin, and its
+# sh.exe puts that dir first on PATH. When cargo compiles native C deps like
+# ring, cc1.exe loads those incompatible DLLs and crashes silently. Putting
+# MSYS2's mingw64 bin first makes the right DLLs win. No-op on Linux/CI.
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        export PATH="/c/msys64/mingw64/bin:$PATH"
+        ;;
+esac
+
 echo "==> pre-push: cargo fmt --check"
 cargo fmt --all -- --check || {
     echo "ERROR: cargo fmt check failed."
