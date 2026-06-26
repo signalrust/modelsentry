@@ -135,7 +135,7 @@ impl Default for AnthropicConfig {
 }
 
 fn default_anthropic_model() -> String {
-    "claude-sonnet-4-20250514".to_string()
+    "claude-sonnet-4-6".to_string()
 }
 fn default_anthropic_base_url() -> String {
     "https://api.anthropic.com".to_string()

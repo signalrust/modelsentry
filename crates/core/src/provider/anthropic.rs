@@ -94,6 +94,11 @@ struct RequestMessage<'a> {
 #[derive(Deserialize)]
 struct MessagesResponse {
     content: Vec<ContentBlock>,
+    /// Why generation stopped. `"refusal"` means a safety classifier declined
+    /// the request (returned as HTTP 200 with empty/partial content on current
+    /// Claude models) — distinct from `"end_turn"`.
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +171,14 @@ impl LlmProvider for AnthropicProvider {
                     message: format!("failed to deserialize response: {e}"),
                 })?;
 
+        // A safety refusal returns HTTP 200 but is not a usable completion —
+        // surface it explicitly so it never silently pollutes a baseline.
+        if parsed.stop_reason.as_deref() == Some("refusal") {
+            return Err(ModelSentryError::Provider {
+                message: "Anthropic declined the request (stop_reason: refusal)".into(),
+            });
+        }
+
         parsed
             .content
             .into_iter()
@@ -195,7 +208,7 @@ mod tests {
     use super::*;
 
     fn make_provider(base_url: &str) -> AnthropicProvider {
-        AnthropicProvider::new(ApiKey::new("test-key".into()), "claude-3-7-sonnet-20250219")
+        AnthropicProvider::new(ApiKey::new("test-key".into()), "claude-sonnet-4-6")
             .expect("valid provider config")
             .with_base_url(base_url.to_string())
     }
@@ -206,7 +219,7 @@ mod tests {
             "type": "message",
             "role": "assistant",
             "content": [{"type": "text", "text": text}],
-            "model": "claude-3-7-sonnet-20250219",
+            "model": "claude-sonnet-4-6",
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 10, "output_tokens": 20}
         })
@@ -235,6 +248,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("embeddings not supported"));
+    }
+
+    #[tokio::test]
+    async fn complete_returns_error_on_refusal_stop_reason() {
+        let server = MockServer::start().await;
+        // HTTP 200 but the safety classifier declined: empty content + refusal.
+        let refusal = serde_json::json!({
+            "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "refusal",
+            "usage": {"input_tokens": 10, "output_tokens": 0}
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(refusal))
+            .mount(&server)
+            .await;
+
+        let err = make_provider(&server.uri())
+            .complete("hello")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("refusal"));
     }
 
     #[tokio::test]

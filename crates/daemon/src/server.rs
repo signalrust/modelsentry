@@ -155,9 +155,26 @@ async fn auth_middleware(
     });
 
     match token {
-        Some(t) if api_keys.contains(&t) => Ok(next.run(request).await),
+        Some(t) if token_matches(&api_keys, &t) => Ok(next.run(request).await),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+/// Check `candidate` against every configured key in constant time.
+///
+/// Uses `subtle::ConstantTimeEq` and always compares against all keys (no
+/// early return) so the response latency does not leak how many leading bytes
+/// of a key were guessed — closing the timing side-channel that a plain
+/// `Vec::contains` / `==` comparison would open.
+fn token_matches(api_keys: &[String], candidate: &str) -> bool {
+    use subtle::ConstantTimeEq;
+
+    let candidate = candidate.as_bytes();
+    let mut matched = subtle::Choice::from(0u8);
+    for key in api_keys {
+        matched |= key.as_bytes().ct_eq(candidate);
+    }
+    matched.into()
 }
 
 /// Start the HTTP server and block until it terminates.
