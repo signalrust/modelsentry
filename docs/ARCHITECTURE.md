@@ -1,6 +1,6 @@
 # ModelSentry — Architecture & Engineering Standards
 **Stack:** Rust (workspace) · Axum · Redb · Svelte 5 · SvelteKit  
-**Date:** March 6, 2026
+**Last updated:** June 26, 2026
 
 ---
 
@@ -16,7 +16,7 @@ ModelSentry is a self-hosted daemon that fingerprints LLM API behavior by period
 │  │  Scheduler │─────────────▶│ Probe Runner│──────────────────────▶  │
 │  │ (cron/tick)│              │             │  LLM Provider API        │
 │  └────────────┘              └──────┬──────┘  (OpenAI / Anthropic /  │
-│                                     │          Ollama / Azure)        │
+│                                     │          Ollama)                │
 │                              results│                                 │
 │                                     ▼                                 │
 │                          ┌──────────────────┐                        │
@@ -38,7 +38,7 @@ ModelSentry is a self-hosted daemon that fingerprints LLM API behavior by period
 │                                                                      │
 │  ┌───────────────────────────────────────────────────────────────┐   │
 │  │              Axum REST API  (port 7740)                       │   │
-│  │  /api/probes  /api/baselines  /api/runs  /api/alerts          │   │
+│  │  /api/probes /api/baselines /api/runs /api/alerts /api/vault  │   │
 │  └──────────────────────────────┬────────────────────────────────┘   │
 │                                 │ HTTP + WebSocket                   │
 └─────────────────────────────────┼────────────────────────────────────┘
@@ -115,15 +115,16 @@ modelsentry/
 │   │           ├── probes.rs
 │   │           ├── baselines.rs
 │   │           ├── runs.rs
-│   │           └── alerts.rs
+│   │           ├── alerts.rs
+│   │           └── vault.rs    ← /api/vault key management endpoints
 │   │
 │   └── cli/                    ← binary: clap derive CLI
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs
 │           └── commands/
-│               ├── probe.rs    ← probe add / list / delete / run-now
-│               ├── baseline.rs ← baseline capture / diff / list
+│               ├── probe.rs    ← probe add / list / delete / run-now / status
+│               ├── baseline.rs ← baseline capture / list
 │               └── alert.rs    ← alert list / ack
 │
 ├── web/                        ← SvelteKit frontend (Svelte 5 runes)
@@ -156,8 +157,8 @@ modelsentry/
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
-│   ├── AUDIT_REPORT.md
-│   └── PROJECT_PLAN.md
+│   ├── LOCAL_CI_GUIDE.md
+│   └── RELEASE_READINESS_CHECKLIST.md
 │
 └── Makefile                    ← dev shortcuts (check, test, run, fmt)
 ```
@@ -172,15 +173,15 @@ modelsentry/
 |---|---|---|
 | `tokio` | 1.x | Async runtime (`full` features) |
 | `axum` | 0.8 | REST API router + middleware |
-| `tower` | 0.4 | Middleware layers (rate-limit, timeout, trace) |
-| `tower-http` | 0.5 | CORS, ServeDir, request logging |
+| `tower` | 0.5 | Middleware layers (timeout) |
+| `tower-http` | 0.6 | CORS, ServeDir, request logging |
 | `hyper` | 1.x | HTTP client/server (used by axum internally) |
 | `reqwest` | 0.12 | HTTP client for LLM provider API calls |
 | `serde` | 1.x | Serialization framework |
 | `serde_json` | 1.x | JSON encoding/decoding |
 | `toml` | 1.x | Config file parsing |
-| `redb` | 3.x | Pure-Rust embedded database (no C deps) |
-| `age` | 0.10 | Encryption for API key vault |
+| `redb` | 4.x | Pure-Rust embedded database (no C deps) |
+| `age` | 0.11 | Encryption for API key vault |
 | `secrecy` | 0.10 | `SecretBox<T>` / `SecretString` wrapper — prevents accidental logging |
 | `thiserror` | 2.x | Error type derive macro |
 | `anyhow` | 1.x | Error propagation in binaries only (never in lib crates) |
@@ -188,12 +189,12 @@ modelsentry/
 | `tracing-subscriber` | 0.3 | JSON log formatter, env-filter |
 | `async-trait` | 0.1 | Async methods in trait definitions |
 | `proptest` | 1.x | Property-based testing for drift algorithms |
-| `criterion` | 0.5 | Micro-benchmarks |
+| `criterion` | 0.8 | Micro-benchmarks |
 | `clap` | 4.x | CLI with derive macros |
-| `tokio-cron-scheduler` | 0.10 | Cron-style probe scheduling |
+| `cron` | 0.16 | Cron expression parsing for probe scheduling |
 | `uuid` | 1.x | ID generation (v4, features = ["v4", "serde"]) |
 | `chrono` | 0.4 | Timestamps (UTC only, serde feature) |
-| `mockall` | 0.12 | Mock generation for `LlmProvider` in unit tests |
+| `mockall` | 0.14 | Mock generation for `LlmProvider` in unit tests |
 | `wiremock` | 0.6 | HTTP mock server for integration tests |
 | `tempfile` | 3.x | Temporary directories for test databases and vaults |
 | `include_dir` | 0.7 | Embed static web assets into daemon binary |
@@ -204,7 +205,7 @@ modelsentry/
 |---|---|---|
 | `svelte` | 5.x | UI framework (runes: `$state`, `$derived`, `$props`) |
 | `@sveltejs/kit` | 2.x | Full-stack framework (routing, SSR) |
-| `vite` | 7.x | Build tool |
+| `vite` | 8.x | Build tool |
 | `chart.js` | 4.x | Drift score timeline charts (used directly, no wrapper) |
 | `zod` | 4.x | API response validation |
 
@@ -212,14 +213,13 @@ modelsentry/
 
 | Tool | Purpose |
 |---|---|
-| `cargo clippy` | Linter — `deny(warnings)` in CI |
+| `cargo clippy` | Linter — `-D warnings` in CI |
 | `cargo fmt` | Formatter — `--check` in CI |
 | `cargo test` | Unit + integration tests |
-| `cargo bench` | Benchmark suite |
-| `cargo audit` | Dependency vulnerability scan |
-| `cargo deny` | License compliance + duplicate detection |
-| `cargo udeps` | Detect unused dependencies |
-| `cargo nextest` | Faster parallel test runner |
+| `cargo bench` | Benchmark suite (criterion) |
+| `cargo audit` | Dependency vulnerability scan (CI `security` job) |
+
+> See [`LOCAL_CI_GUIDE.md`](LOCAL_CI_GUIDE.md) for the full local hook / CI-equivalent workflow.
 
 ---
 
@@ -233,10 +233,10 @@ rustup toolchain install stable
 rustup component add clippy rustfmt
 
 # Install cargo tools
-cargo install cargo-nextest cargo-audit cargo-deny cargo-udeps
+cargo install cargo-audit
 
-# Node.js 20+ for the web frontend
-node --version  # >= 20.0.0
+# Node.js 22+ for the web frontend
+node --version  # >= 22.0.0
 ```
 
 ### rust-toolchain.toml
@@ -270,7 +270,7 @@ anyhow      = "1"
 tracing     = "0.1"
 uuid        = { version = "1", features = ["v4", "serde"] }
 chrono      = { version = "0.4", features = ["serde"] }
-redb        = "3"
+redb        = "4"
 secrecy     = "0.10"
 toml        = "1"
 
@@ -414,13 +414,7 @@ enabled = false
 
 ### CI Test Matrix
 
-```yaml
-# .github/workflows/ci.yml
-strategy:
-  matrix:
-    os: [ubuntu-latest, macos-latest]
-    rust: [stable]
-```
+CI runs on `ubuntu-latest` with the stable toolchain across three jobs — `rust` (check / fmt / clippy / test), `security` (cargo audit), and `frontend` (npm check / build / audit). See [`LOCAL_CI_GUIDE.md`](LOCAL_CI_GUIDE.md).
 
 ---
 
@@ -430,51 +424,31 @@ strategy:
 
 Every developer commit must pass locally before push:
 
-```bash
-# .git/hooks/pre-commit (or via lefthook / pre-commit tool)
+```sh
+# .githooks/pre-commit (enabled via `git config core.hooksPath .githooks`)
 set -e
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --lib  # unit tests only (fast)
+# svelte-check runs only when web/ files are staged
+# (cargo test + audits run in the pre-push hook)
 ```
 
 ### CI (every push + every PR)
 
 ```yaml
-# .github/workflows/ci.yml
-name: CI
+# .github/workflows/ci.yml — three jobs, all on ubuntu-latest
 on: [push, pull_request]
 
 jobs:
-  ci:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Tests
-        run: cargo test --workspace
-
-      - name: Audit
-        run: cargo audit
-
-      - name: Deny (license + duplicates)
-        run: cargo deny check
+  rust:      # cargo check / fmt --check / clippy -D warnings / test --workspace
+  security:  # cargo audit
+  frontend:  # npm ci / npm run check / npm run build / npm audit --audit-level=high
 ```
 
+CodeQL and dependency-review run via separate workflows (`codeql.yml`, `dependency-review.yml`).
+
 ### Release Gate (tags only)
-Additional steps on tag push: `cargo udeps`, `cargo bench` (comparison), frontend build.
+Release builds run via `.github/workflows/release.yml`. See [`RELEASE_READINESS_CHECKLIST.md`](RELEASE_READINESS_CHECKLIST.md) for the manual pre-release gate.
 
 ---
 

@@ -53,15 +53,18 @@ cargo install --path crates/cli
 cp config/default.toml config/local.toml
 ```
 
-Edit `config/local.toml` to set your database and vault paths (defaults write to `.modelsentry/` in the current directory). Store your LLM API key in the vault — ModelSentry never logs or writes it to disk unencrypted:
+Edit `config/local.toml` to set your database and vault paths (defaults write to `.modelsentry/` in the current directory).
+
+The encrypted vault is unlocked at daemon startup with a passphrase supplied via the `MODELSENTRY_VAULT_PASSPHRASE` environment variable (or the `--vault-passphrase` flag). API keys are stored through the REST API — ModelSentry never logs or writes them to disk unencrypted:
 
 ```bash
-# First-time vault setup — you will be prompted for a passphrase
-modelsentry vault init
-
-# Store your OpenAI key
-modelsentry vault set openai sk-...
+# With the daemon running, store your OpenAI key:
+curl -X PUT http://127.0.0.1:7740/api/vault/keys/openai \
+  -H 'content-type: application/json' \
+  -d '{"key": "sk-..."}'
 ```
+
+`provider` is the path segment (`openai`, `anthropic`, `ollama`). The body also accepts optional `model` and `base_url` overrides. For Ollama, `key` may be empty.
 
 ### 3 — Start the daemon
 
@@ -200,8 +203,9 @@ modelsentry/
 │   └── cli/                  # modelsentry CLI binary
 ├── web/                      # SvelteKit dashboard
 └── docs/
-    ├── ARCHITECTURE.md
-    └── PROJECT_PLAN.md
+    ├── ARCHITECTURE.md            # System design + engineering standards
+    ├── LOCAL_CI_GUIDE.md          # Local hooks / CI-equivalent checks
+    └── RELEASE_READINESS_CHECKLIST.md
 ```
 
 ---
@@ -275,10 +279,10 @@ npm run check
 ## Documentation and Source of Truth
 
 - Architecture and engineering standards: `docs/ARCHITECTURE.md`
-- Step-by-step implementation plan: `docs/PROJECT_PLAN.md`
+- Local CI / git-hook checks: `docs/LOCAL_CI_GUIDE.md`
 - Release gate checklist: `docs/RELEASE_READINESS_CHECKLIST.md`
 
-When implementation details and README differ, `docs/ARCHITECTURE.md` and `docs/PROJECT_PLAN.md` are the authoritative planning documents.
+When implementation details and README differ, `docs/ARCHITECTURE.md` is the authoritative design document.
 
 ## Engineering Principles
 

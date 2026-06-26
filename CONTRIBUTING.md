@@ -3,7 +3,7 @@
 ## Development Setup
 
 1. Install Rust stable with `clippy` and `rustfmt`
-2. Install Node.js 20+ and npm
+2. Install Node.js 22+ and npm
 3. Run:
 
 ```bash
@@ -45,4 +45,4 @@ If behavior changes, update:
 
 - `README.md` for developer-facing usage
 - `docs/ARCHITECTURE.md` for system-level impact
-- `docs/PROJECT_PLAN.md` when implementation milestones shift
+- `docs/LOCAL_CI_GUIDE.md` when the hook / CI workflow changes
