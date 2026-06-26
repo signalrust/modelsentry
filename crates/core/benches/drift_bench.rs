@@ -2,6 +2,9 @@
 //
 // Run with: cargo bench -p modelsentry-core
 
+// Benchmarks are not production code — unwrap is fine here.
+#![allow(clippy::unwrap_used)]
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use chrono::Utc;

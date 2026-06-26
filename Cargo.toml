@@ -45,3 +45,8 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
+# Library/runtime code must not panic via `unwrap()` or `panic!` — return typed
+# errors instead. `expect("reason")` stays allowed for documented invariants
+# (e.g. lock poisoning). Tests are exempted via `.clippy.toml`.
+unwrap_used = "warn"
+panic = "warn"

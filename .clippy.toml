@@ -1,2 +1,8 @@
 msrv = "1.85"
 avoid-breaking-exported-api = false
+
+# The `unwrap_used` / `panic` restriction lints (enabled in Cargo.toml) target
+# library/runtime code. Tests may panic freely.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

@@ -2,6 +2,10 @@
 //
 // #[path] is required because integration test binaries resolve `mod`
 // declarations relative to the tests/ directory, not tests/integration/.
+
+// Integration-test helpers (not inside #[cfg(test)]) may unwrap freely.
+#![allow(clippy::unwrap_used)]
+
 #[path = "integration/alert_fire.rs"]
 mod alert_fire;
 #[path = "integration/drift_detection.rs"]
