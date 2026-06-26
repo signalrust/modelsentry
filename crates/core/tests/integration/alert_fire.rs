@@ -58,7 +58,7 @@ async fn webhook_receives_correct_payload_on_drift_event() {
     // Report that clearly exceeds both thresholds
     let report = make_report(0.5, 0.4, DriftLevel::High);
 
-    let engine = AlertEngine::new(reqwest::Client::new());
+    let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine.evaluate_and_fire(&report, &[rule]).await;
 
     assert_eq!(events.len(), 1, "one alert event should have been fired");
@@ -89,7 +89,7 @@ async fn inactive_rule_does_not_fire_webhook() {
 
     let report = make_report(0.5, 0.4, DriftLevel::High);
 
-    let engine = AlertEngine::new(reqwest::Client::new());
+    let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine.evaluate_and_fire(&report, &[rule]).await;
 
     assert!(events.is_empty(), "inactive rule should produce no events");
@@ -115,7 +115,7 @@ async fn below_threshold_report_does_not_fire_webhook() {
     // Report well below thresholds
     let report = make_report(0.05, 0.03, DriftLevel::None);
 
-    let engine = AlertEngine::new(reqwest::Client::new());
+    let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine.evaluate_and_fire(&report, &[rule]).await;
 
     assert!(
@@ -144,7 +144,7 @@ async fn webhook_payload_contains_required_fields() {
     let rule_id = rule.id.clone();
 
     let report = make_report(0.3, 0.2, DriftLevel::Medium);
-    let engine = AlertEngine::new(reqwest::Client::new());
+    let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events: Vec<AlertEvent> = engine.evaluate_and_fire(&report, &[rule]).await;
 
     assert_eq!(events.len(), 1);

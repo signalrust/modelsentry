@@ -35,6 +35,7 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     model: String,
     base_url: String,
+    max_tokens: u32,
 }
 
 impl AnthropicProvider {
@@ -64,6 +65,7 @@ impl AnthropicProvider {
             client,
             model,
             base_url: DEFAULT_BASE_URL.to_string(),
+            max_tokens: DEFAULT_MAX_TOKENS,
         })
     }
 
@@ -73,6 +75,12 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_base_url(self, base_url: String) -> Self {
         Self { base_url, ..self }
+    }
+
+    /// Override the per-request `max_tokens` (completion length cap).
+    #[must_use]
+    pub fn with_max_tokens(self, max_tokens: u32) -> Self {
+        Self { max_tokens, ..self }
     }
 }
 
@@ -137,7 +145,7 @@ impl LlmProvider for AnthropicProvider {
 
         let request_body = MessagesRequest {
             model: &self.model,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: self.max_tokens,
             messages: vec![RequestMessage {
                 role: "user",
                 content: prompt,
@@ -308,6 +316,28 @@ mod tests {
             .await;
 
         make_provider(&server.uri()).complete("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn complete_sends_configured_max_tokens() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        // The mock only matches when the body carries the overridden value, so
+        // a regression to the hardcoded default would 404 → unwrap panics.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(serde_json::json!({ "max_tokens": 7 })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_response("ok")))
+            .mount(&server)
+            .await;
+
+        AnthropicProvider::new(ApiKey::new("test-key".into()), "claude-sonnet-4-6")
+            .expect("valid provider config")
+            .with_base_url(server.uri())
+            .with_max_tokens(7)
+            .complete("hi")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

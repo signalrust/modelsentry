@@ -208,6 +208,7 @@ mod tests {
                 alerts: AlertsConfig {
                     drift_threshold_kl: 0.5,
                     drift_threshold_cos: 0.5,
+                    allow_private_webhook_targets: false,
                 },
                 providers: ProvidersConfig::default(),
                 auth: AuthConfig::default(),

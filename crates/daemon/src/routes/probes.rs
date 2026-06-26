@@ -69,6 +69,9 @@ async fn create_probe(
             message: "each prompt text must not be empty".to_string(),
         }));
     }
+    if let Err(message) = crate::scheduler::validate_schedule(&body.schedule) {
+        return Err(AppError(ModelSentryError::Config { message }));
+    }
     let now = Utc::now();
     let probe = Probe {
         id: ProbeId::new(),
@@ -240,6 +243,7 @@ mod tests {
             alerts: AlertsConfig {
                 drift_threshold_kl: 0.5,
                 drift_threshold_cos: 0.5,
+                allow_private_webhook_targets: false,
             },
             providers: ProvidersConfig::default(),
             auth: AuthConfig::default(),
@@ -301,6 +305,45 @@ mod tests {
         // delete
         let del = server.delete(&format!("/probes/{id}")).await;
         del.assert_status(StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn create_probe_with_invalid_cron_returns_422() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let bad = json!({
+            "name": "t", "provider": { "kind": "anthropic" }, "model": "m",
+            "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping", "expected_contains": null, "expected_not_contains": null }],
+            "schedule": { "kind": "cron", "expression": "not a cron" }
+        });
+        let resp = server.post("/probes").json(&bad).await;
+        resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_probe_with_zero_minutes_returns_422() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let bad = json!({
+            "name": "t", "provider": { "kind": "anthropic" }, "model": "m",
+            "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping", "expected_contains": null, "expected_not_contains": null }],
+            "schedule": { "kind": "every_minutes", "minutes": 0 }
+        });
+        let resp = server.post("/probes").json(&bad).await;
+        resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_probe_with_valid_cron_returns_201() {
+        let (_dir, store) = open_store();
+        let (_vault_dir, server) = test_app(store);
+        let good = json!({
+            "name": "t", "provider": { "kind": "anthropic" }, "model": "m",
+            "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping", "expected_contains": null, "expected_not_contains": null }],
+            "schedule": { "kind": "cron", "expression": "0 * * * *" }
+        });
+        let resp = server.post("/probes").json(&good).await;
+        resp.assert_status(StatusCode::CREATED);
     }
 
     #[tokio::test]

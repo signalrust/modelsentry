@@ -205,29 +205,60 @@ async fn run_probe_job(
     Ok(())
 }
 
+/// Parse a probe cron expression, accepting both 6-field
+/// (`sec min hour dom month dow`) and standard 5-field (`min hour dom month dow`)
+/// forms — the latter by auto-prepending `"0 "`.
+///
+/// # Errors
+///
+/// Returns a human-readable message if the expression parses as neither form.
+pub fn parse_cron_schedule(expression: &str) -> std::result::Result<Schedule, String> {
+    Schedule::from_str(expression)
+        .or_else(|_| Schedule::from_str(&format!("0 {expression}")))
+        .map_err(|e| format!("invalid cron expression '{expression}': {e}"))
+}
+
+/// Validate a [`ProbeSchedule`] before it is persisted, so a bad schedule is
+/// rejected at probe-create time instead of silently degrading at runtime.
+///
+/// # Errors
+///
+/// - `EveryMinutes { minutes: 0 }` would busy-loop the scheduler.
+/// - An unparseable cron expression would otherwise fall back to hourly.
+pub fn validate_schedule(schedule: &ProbeSchedule) -> std::result::Result<(), String> {
+    match schedule {
+        ProbeSchedule::EveryMinutes { minutes } => {
+            if *minutes == 0 {
+                return Err("schedule.minutes must be at least 1".to_string());
+            }
+            Ok(())
+        }
+        ProbeSchedule::Cron { expression } => parse_cron_schedule(expression).map(|_| ()),
+    }
+}
+
 fn sleep_until_next_run(schedule: &ProbeSchedule) -> Duration {
     match schedule {
-        ProbeSchedule::EveryMinutes { minutes } => Duration::from_secs(u64::from(*minutes) * 60),
-        ProbeSchedule::Cron { expression } => {
-            // Support both 6-field (sec min hour dom month dow) and standard
-            // 5-field (min hour dom month dow) cron by auto-prepending "0 ".
-            let parsed = Schedule::from_str(expression)
-                .or_else(|_| Schedule::from_str(&format!("0 {expression}")));
-            match parsed {
-                Ok(sched) => sched
-                    .upcoming(Utc)
-                    .next()
-                    .and_then(|t| (t - Utc::now()).to_std().ok())
-                    .unwrap_or(Duration::from_secs(1)),
-                Err(e) => {
-                    tracing::warn!(
-                        expr = expression,
-                        "invalid cron expression: {e}; falling back to 1-hour interval"
-                    );
-                    Duration::from_secs(60 * 60)
-                }
-            }
+        ProbeSchedule::EveryMinutes { minutes } => {
+            // Guard against a 0-minute schedule slipping past validation
+            // (e.g. a probe stored before this check existed) → no busy loop.
+            Duration::from_secs(u64::from((*minutes).max(1)) * 60)
         }
+        ProbeSchedule::Cron { expression } => match parse_cron_schedule(expression) {
+            Ok(sched) => sched
+                .upcoming(Utc)
+                .next()
+                .and_then(|t| (t - Utc::now()).to_std().ok())
+                .unwrap_or(Duration::from_secs(1)),
+            Err(e) => {
+                tracing::warn!(
+                    expr = expression,
+                    "{e}; falling back to 1-hour interval (this probe should have been \
+                     rejected at create time)"
+                );
+                Duration::from_secs(60 * 60)
+            }
+        },
     }
 }
 
@@ -483,6 +514,39 @@ mod tests {
             expression: "not-a-cron-expr".to_string(),
         };
         assert_eq!(sleep_until_next_run(&s), Duration::from_secs(60 * 60));
+    }
+
+    #[test]
+    fn zero_minutes_schedule_does_not_busy_loop() {
+        // Defensive: a 0-minute probe that slipped past validation must still
+        // yield a non-zero sleep, not a tight loop.
+        let s = ProbeSchedule::EveryMinutes { minutes: 0 };
+        assert_eq!(sleep_until_next_run(&s), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn parse_cron_schedule_accepts_five_and_six_field() {
+        assert!(parse_cron_schedule("0 * * * *").is_ok()); // 5-field
+        assert!(parse_cron_schedule("0 0 * * * *").is_ok()); // 6-field
+        assert!(parse_cron_schedule("definitely not cron").is_err());
+    }
+
+    #[test]
+    fn validate_schedule_rejects_bad_inputs_and_accepts_good() {
+        assert!(validate_schedule(&ProbeSchedule::EveryMinutes { minutes: 0 }).is_err());
+        assert!(validate_schedule(&ProbeSchedule::EveryMinutes { minutes: 1 }).is_ok());
+        assert!(
+            validate_schedule(&ProbeSchedule::Cron {
+                expression: "bogus".to_string()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_schedule(&ProbeSchedule::Cron {
+                expression: "0 * * * *".to_string()
+            })
+            .is_ok()
+        );
     }
 
     #[test]

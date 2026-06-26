@@ -55,6 +55,9 @@ async fn main() -> anyhow::Result<()> {
     let config = AppConfig::load(&cli.config)?;
     config.validate()?;
     tracing::info!(config = %cli.config.display(), "configuration loaded");
+    for warning in config.security_warnings() {
+        tracing::warn!("SECURITY: {warning}");
+    }
 
     // ── Data directories ───────────────────────────────────────────────────
     if let Some(parent) = config.database.path.parent() {
@@ -104,7 +107,10 @@ async fn main() -> anyhow::Result<()> {
         config.alerts.drift_threshold_kl,
         config.alerts.drift_threshold_cos,
     )?);
-    let alert_engine = Arc::new(AlertEngine::new(http_client));
+    let alert_engine = Arc::new(
+        AlertEngine::new(http_client)
+            .with_allow_private_targets(config.alerts.allow_private_webhook_targets),
+    );
 
     // ── Providers — load API keys from vault ─────────────────────────────
     let provider_map = new_registry();

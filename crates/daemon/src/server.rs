@@ -16,9 +16,19 @@ use modelsentry_common::{
 use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
 use modelsentry_store::AppStore;
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use crate::{routes, scheduler::ProviderRegistry, vault::Vault};
+
+/// Maximum accepted request body. Probe/alert payloads are small; anything
+/// larger is rejected with `413 Payload Too Large` to bound memory use.
+const MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+
+/// Per-client rate limit (applied in `run()` keyed by peer IP): the bucket
+/// holds up to `RATE_LIMIT_BURST` requests and refills one token per second,
+/// so a steady stream is allowed but credential brute-forcing is throttled.
+const RATE_LIMIT_BURST: u32 = 100;
+const RATE_LIMIT_REPLENISH_SECS: u64 = 1;
 
 /// `GET /health` — lightweight liveness probe for the daemon.
 async fn health() -> Json<serde_json::Value> {
@@ -120,6 +130,7 @@ pub fn build_router(state: AppState) -> Router {
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
+                .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
                 .layer(axum::error_handling::HandleErrorLayer::new(
                     |_: BoxError| async { StatusCode::REQUEST_TIMEOUT },
                 ))
@@ -193,12 +204,31 @@ pub async fn run(config: &AppConfig, state: AppState) -> Result<()> {
             })?;
 
     tracing::info!("listening on {addr}");
-    let router = build_router(state);
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| ModelSentryError::Config {
-            message: format!("server error: {e}"),
-        })
+
+    // Per-IP rate limiting (keyed by peer address). Applied only here on the
+    // real serve path — `build_router` stays free of it so in-process tests
+    // (which have no socket / ConnectInfo) are unaffected.
+    let governor_conf = Arc::new(
+        tower_governor::governor::GovernorConfigBuilder::default()
+            .per_second(RATE_LIMIT_REPLENISH_SECS)
+            .burst_size(RATE_LIMIT_BURST)
+            .finish()
+            .ok_or_else(|| ModelSentryError::Config {
+                message: "invalid rate-limit configuration".to_string(),
+            })?,
+    );
+    let router = build_router(state).layer(tower_governor::GovernorLayer {
+        config: governor_conf,
+    });
+
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|e| ModelSentryError::Config {
+        message: format!("server error: {e}"),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +277,7 @@ mod tests {
             alerts: AlertsConfig {
                 drift_threshold_kl: 0.5,
                 drift_threshold_cos: 0.5,
+                allow_private_webhook_targets: false,
             },
             providers: ProvidersConfig::default(),
             auth: AuthConfig {
@@ -284,6 +315,22 @@ mod tests {
         let (_db, _vault, server) = test_server(config);
         let resp = server.get("/api/probes").await;
         resp.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn oversized_request_body_is_rejected() {
+        let config = make_config(false, vec![]);
+        let (_db, _vault, server) = test_server(config);
+        // 2 MiB > the 1 MiB MAX_BODY_BYTES limit. Send it as JSON so the body
+        // is actually read; the limit aborts the read and axum maps the
+        // length-limit error to 413 Payload Too Large.
+        let big = axum::body::Bytes::from(vec![b'x'; 2 * 1024 * 1024]);
+        let resp = server
+            .post("/api/probes")
+            .content_type("application/json")
+            .bytes(big)
+            .await;
+        resp.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

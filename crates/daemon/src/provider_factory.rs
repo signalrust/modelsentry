@@ -48,7 +48,8 @@ pub fn build_provider(
                 .with_embedding_model(
                     &config.providers.openai.embedding_model,
                     config.providers.openai.embedding_dim,
-                );
+                )
+                .with_max_tokens(config.providers.openai.max_tokens);
             Ok(Some(Arc::new(p) as DynProvider))
         }
         "anthropic" => {
@@ -57,7 +58,8 @@ pub fn build_provider(
                 .as_deref()
                 .unwrap_or(&config.providers.anthropic.model);
             let p = AnthropicProvider::new(key, model)?
-                .with_base_url(config.providers.anthropic.base_url.clone());
+                .with_base_url(config.providers.anthropic.base_url.clone())
+                .with_max_tokens(config.providers.anthropic.max_tokens);
             Ok(Some(Arc::new(p) as DynProvider))
         }
         id if id.starts_with("ollama") => {

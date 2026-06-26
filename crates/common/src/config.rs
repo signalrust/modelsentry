@@ -57,6 +57,11 @@ pub struct SchedulerConfig {
 pub struct AlertsConfig {
     pub drift_threshold_kl: f32,
     pub drift_threshold_cos: f32,
+    /// Allow webhook/Slack alert targets that resolve to private, loopback, or
+    /// link-local addresses. Defaults to `false` (SSRF-safe). Enable only for
+    /// trusted internal receivers.
+    #[serde(default)]
+    pub allow_private_webhook_targets: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -226,6 +231,42 @@ impl AppConfig {
         }
         Ok(())
     }
+
+    /// Insecure-but-valid configuration choices worth warning about at startup.
+    ///
+    /// These never fail validation (the daemon must still run), but the
+    /// operator should see them — e.g. an unauthenticated API, an
+    /// unauthenticated API on a non-loopback bind, or fully permissive CORS.
+    #[must_use]
+    pub fn security_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let loopback = matches!(self.server.host.as_str(), "127.0.0.1" | "localhost" | "::1");
+
+        if !self.auth.enabled {
+            if loopback {
+                warnings.push(
+                    "API authentication is disabled ([auth] enabled = false) — anything that \
+                     can reach the port has full access."
+                        .to_string(),
+                );
+            } else {
+                warnings.push(format!(
+                    "API authentication is disabled AND the server binds a non-loopback address \
+                     ({}) — the API is exposed to the network with no auth. Enable [auth] or bind \
+                     to 127.0.0.1.",
+                    self.server.host
+                ));
+            }
+        }
+        if self.server.cors_origin == "*" {
+            warnings.push(
+                "CORS is fully permissive ([server] cors_origin = \"*\") — any website can call \
+                 this API from a browser. Set a specific origin for production."
+                    .to_string(),
+            );
+        }
+        warnings
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +302,7 @@ mod tests {
             alerts: AlertsConfig {
                 drift_threshold_kl: 0.1,
                 drift_threshold_cos: 0.1,
+                allow_private_webhook_targets: false,
             },
             providers: ProvidersConfig::default(),
             auth: AuthConfig::default(),
@@ -314,6 +356,50 @@ mod tests {
         cfg.auth.enabled = true;
         cfg.auth.api_keys = vec!["secret-key".to_string()];
         cfg.validate().expect("should be valid");
+    }
+
+    #[test]
+    fn security_warnings_flags_disabled_auth_on_loopback() {
+        let mut cfg = test_config();
+        cfg.auth.enabled = false;
+        cfg.server.host = "127.0.0.1".to_string();
+        cfg.server.cors_origin = "http://localhost:5173".to_string();
+        let w = cfg.security_warnings();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("authentication is disabled"));
+    }
+
+    #[test]
+    fn security_warnings_escalates_disabled_auth_on_public_bind() {
+        let mut cfg = test_config();
+        cfg.auth.enabled = false;
+        cfg.server.host = "0.0.0.0".to_string();
+        let w = cfg.security_warnings();
+        assert!(
+            w.iter().any(|m| m.contains("non-loopback")),
+            "expected non-loopback escalation, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn security_warnings_flags_permissive_cors() {
+        let mut cfg = test_config();
+        cfg.server.cors_origin = "*".to_string();
+        let w = cfg.security_warnings();
+        assert!(
+            w.iter().any(|m| m.contains("CORS is fully permissive")),
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn security_warnings_silent_for_secure_config() {
+        let mut cfg = test_config();
+        cfg.auth.enabled = true;
+        cfg.auth.api_keys = vec!["secret-key".to_string()];
+        cfg.server.host = "127.0.0.1".to_string();
+        cfg.server.cors_origin = "http://localhost:5173".to_string();
+        assert!(cfg.security_warnings().is_empty());
     }
 
     #[test]

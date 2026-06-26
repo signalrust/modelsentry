@@ -29,6 +29,10 @@ default_interval_minutes = 60
 drift_threshold_kl = 0.10
 # Cosine distance — recommended starting range: 0.10–0.25
 drift_threshold_cos = 0.15
+# Allow alert webhooks to target private/loopback/link-local addresses.
+# Keep false unless your webhook receiver is on a trusted internal network —
+# leaving it false blocks SSRF to cloud-metadata endpoints and localhost.
+allow_private_webhook_targets = false
 
 # --------------------------------------------------------------------------
 # Provider defaults — override model names, base URLs, and token limits.

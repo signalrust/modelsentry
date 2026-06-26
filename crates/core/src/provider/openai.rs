@@ -34,6 +34,7 @@ pub struct OpenAiProvider {
     embedding_model: String,
     embed_dim: usize,
     base_url: String,
+    max_tokens: u32,
 }
 
 impl OpenAiProvider {
@@ -66,7 +67,14 @@ impl OpenAiProvider {
             embedding_model: DEFAULT_EMBEDDING_MODEL.to_string(),
             embed_dim: DEFAULT_EMBEDDING_DIM,
             base_url: DEFAULT_BASE_URL.to_string(),
+            max_tokens: DEFAULT_MAX_TOKENS,
         })
+    }
+
+    /// Override the per-request `max_tokens` (completion length cap).
+    #[must_use]
+    pub fn with_max_tokens(self, max_tokens: u32) -> Self {
+        Self { max_tokens, ..self }
     }
 
     /// Override the embedding model and its output dimension.
@@ -201,7 +209,7 @@ impl LlmProvider for OpenAiProvider {
 
         let request_body = ChatRequest {
             model: &self.model,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: self.max_tokens,
             messages: vec![ChatMessage {
                 role: "user",
                 content: prompt,
