@@ -79,9 +79,9 @@ Create a TOML file describing the probe:
 
 ```toml
 # my_probe.toml
-name         = "gpt-4o-smoke"
+name         = "gpt-5-smoke"
 provider     = "open_ai"
-model        = "gpt-4o"
+model        = "gpt-5.4"
 schedule     = { kind = "every_minutes", minutes = 60 }
 
 [[prompts]]
@@ -116,7 +116,7 @@ modelsentry probe status 018e1234-...
 ```
 
 ```
-Probe      gpt-4o-smoke
+Probe      gpt-5-smoke
 Status     ok
 Drift      None  (KL 0.003 / Cos 0.001)
 Last run   2026-03-06 12:00 UTC (42 s)
@@ -180,7 +180,7 @@ The `DriftLevel` is derived from the worst metric relative to configured thresho
 
 | Provider | Embeddings | Completions |
 |----------|-----------|-------------|
-| OpenAI | ✓ (`text-embedding-3-small`) | ✓ (`gpt-4o`, etc.) |
+| OpenAI | ✓ (`text-embedding-3-small`) | ✓ (`gpt-5.4`, `gpt-5.5`, etc.) |
 | Anthropic | — (not supported by API) | ✓ (`claude-*`) |
 | Ollama (local) | ✓ | ✓ |
 

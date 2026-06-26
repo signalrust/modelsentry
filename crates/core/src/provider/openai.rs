@@ -106,7 +106,9 @@ impl OpenAiProvider {
 struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage<'a>>,
-    max_tokens: u32,
+    // GPT-5 / reasoning models reject the legacy `max_tokens` (400) and require
+    // `max_completion_tokens`; it is also accepted by older chat models.
+    max_completion_tokens: u32,
 }
 
 #[derive(Serialize)]
@@ -209,7 +211,7 @@ impl LlmProvider for OpenAiProvider {
 
         let request_body = ChatRequest {
             model: &self.model,
-            max_tokens: self.max_tokens,
+            max_completion_tokens: self.max_tokens,
             messages: vec![ChatMessage {
                 role: "user",
                 content: prompt,
@@ -270,7 +272,7 @@ mod tests {
     use super::*;
 
     fn make_provider(base_url: &str) -> OpenAiProvider {
-        OpenAiProvider::new(ApiKey::new("test-key".into()), "gpt-4o")
+        OpenAiProvider::new(ApiKey::new("test-key".into()), "gpt-5.4")
             .expect("valid provider config")
             .with_base_url(base_url.to_string())
     }
@@ -307,6 +309,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "Hello!");
+    }
+
+    #[tokio::test]
+    async fn complete_sends_max_completion_tokens_not_max_tokens() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        // GPT-5 models 400 on `max_tokens`. The mock only matches when the body
+        // carries `max_completion_tokens`, so a regression to the old field name
+        // would 404 here → unwrap panics.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({ "max_completion_tokens": 7 }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_ok("ok")))
+            .mount(&server)
+            .await;
+
+        OpenAiProvider::new(ApiKey::new("test-key".into()), "gpt-5.4")
+            .expect("valid provider config")
+            .with_base_url(server.uri())
+            .with_max_tokens(7)
+            .complete("hi")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

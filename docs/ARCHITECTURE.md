@@ -351,7 +351,7 @@ drift_threshold_kl = 0.10
 drift_threshold_cos = 0.15
 
 [providers.openai]
-model = "gpt-4o"
+model = "gpt-5.4"
 embedding_model = "text-embedding-3-small"
 embedding_dim = 1536
 base_url = "https://api.openai.com"

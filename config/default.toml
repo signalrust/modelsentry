@@ -40,7 +40,11 @@ allow_private_webhook_targets = false
 # --------------------------------------------------------------------------
 
 [providers.openai]
-model = "gpt-4o"
+# Current OpenAI chat models (June 2026): gpt-5.5 (flagship), gpt-5.4,
+# gpt-5.4-mini, gpt-5.4-nano (cheapest). gpt-4o is deprecated.
+model = "gpt-5.4"
+# Embeddings: text-embedding-3-small (1536 dims) or text-embedding-3-large
+# (3072 dims). Changing this invalidates existing baselines (dims must match).
 embedding_model = "text-embedding-3-small"
 embedding_dim = 1536
 base_url = "https://api.openai.com"
