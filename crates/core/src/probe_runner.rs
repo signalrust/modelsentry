@@ -37,18 +37,21 @@ impl ProbeRunner {
         self.provider.embedding_dim() > 0
     }
 
-    /// Execute all prompts concurrently, collecting embeddings **and** completions.
+    /// Execute all prompts concurrently, sampling each prompt `samples` times and
+    /// collecting output embeddings **and** a representative completion.
     ///
     /// At most `concurrency` prompts are in-flight simultaneously (minimum 1
-    /// even if `concurrency` is 0).  Each prompt holds a semaphore permit for
-    /// the entirety of its embed+complete round-trip.
+    /// even if `concurrency` is 0); each prompt's `samples` draws run
+    /// sequentially within its task. `samples` is clamped to a minimum of 1.
     ///
     /// The returned [`ProbeRun`] always satisfies:
-    /// - `embeddings.len() == probe.prompts.len()`
-    /// - `completions.len() == probe.prompts.len()`
+    /// - `embeddings.len() == probe.prompts.len()` (each entry is that prompt's
+    ///   list of per-sample output embeddings — possibly fewer than `samples` if
+    ///   some draws failed, or empty if all did)
+    /// - `completions.len() == probe.prompts.len()` (one representative per prompt)
     ///
-    /// Prompts where embed or complete failed are stored as empty
-    /// `Vec<f32>` / empty `String`.  The overall status reflects the failure
+    /// A prompt counts as failed (for status classification) when it yields no
+    /// usable embedding or no completion. The overall status reflects the failure
     /// ratio: [`RunStatus::Success`], [`RunStatus::PartialFailure`], or
     /// [`RunStatus::Failed`].
     ///
@@ -59,8 +62,10 @@ impl ProbeRunner {
         &self,
         probe: &Probe,
         concurrency: usize,
+        samples: usize,
     ) -> modelsentry_common::error::Result<ProbeRun> {
         let started_at = Utc::now();
+        let n_samples = samples.max(1);
         let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
 
         let tasks: Vec<_> = probe
@@ -78,15 +83,30 @@ impl ProbeRunner {
                     })?;
                     // Drift is measured on the model's OUTPUT, so we complete
                     // first and embed the completion — never the (fixed) prompt.
-                    let complete = prov.complete(&text).await;
-                    let embed = match &complete {
-                        Ok(answer) if !answer.is_empty() => {
-                            prov.embed(std::slice::from_ref(answer)).await
+                    // Draw `n_samples` completions to build a within-prompt
+                    // distribution; keep the first usable one for display.
+                    let mut sample_embeddings: Vec<Vec<f32>> = Vec::with_capacity(n_samples);
+                    let mut representative: Option<String> = None;
+                    for _ in 0..n_samples {
+                        let Ok(answer) = prov.complete(&text).await else {
+                            continue;
+                        };
+                        if answer.is_empty() {
+                            continue;
                         }
-                        // No usable completion → no embedding for this prompt.
-                        _ => Ok(Vec::new()),
-                    };
-                    Ok::<_, modelsentry_common::error::ModelSentryError>((embed, complete))
+                        if representative.is_none() {
+                            representative = Some(answer.clone());
+                        }
+                        if let Ok(mut vecs) = prov.embed(std::slice::from_ref(&answer)).await {
+                            if !vecs.is_empty() {
+                                sample_embeddings.push(vecs.remove(0).as_slice().to_vec());
+                            }
+                        }
+                    }
+                    Ok::<_, modelsentry_common::error::ModelSentryError>((
+                        sample_embeddings,
+                        representative,
+                    ))
                 }
             })
             .collect();
@@ -99,31 +119,18 @@ impl ProbeRunner {
         let mut failure_count: usize = 0;
 
         for outcome in outcomes {
-            let Ok((embed_res, complete_res)) = outcome else {
+            let Ok((sample_embeddings, representative)) = outcome else {
                 failure_count += 1;
                 embeddings.push(Vec::new());
                 completions.push(String::new());
                 continue;
             };
-            let (embedding, embed_ok) = match embed_res {
-                Ok(mut vecs) if !vecs.is_empty() => {
-                    let raw = vecs.remove(0).as_slice().to_vec();
-                    (raw, true)
-                }
-                _ => (Vec::new(), false),
-            };
-
-            let (completion, complete_ok) = match complete_res {
-                Ok(text) => (text, true),
-                Err(_) => (String::new(), false),
-            };
-
-            if !embed_ok || !complete_ok {
+            // No usable embedding or no completion ⇒ this prompt failed.
+            if sample_embeddings.is_empty() || representative.is_none() {
                 failure_count += 1;
             }
-
-            embeddings.push(embedding);
-            completions.push(completion);
+            embeddings.push(sample_embeddings);
+            completions.push(representative.unwrap_or_default());
         }
 
         Ok(ProbeRun {
@@ -339,19 +346,24 @@ mod tests {
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn run_returns_one_embedding_per_prompt() {
+    async fn run_returns_samples_per_prompt() {
         let runner = ProbeRunner::new(Arc::new(EchoProvider));
         let probe = make_test_probe(4);
-        let run = runner.run(&probe, 4).await.unwrap();
-        assert_eq!(run.embeddings.len(), 4);
-        assert!(run.embeddings.iter().all(|e| e == &[1.0_f32, 2.0_f32]));
+        let run = runner.run(&probe, 4, 2).await.unwrap();
+        assert_eq!(run.embeddings.len(), 4, "one entry per prompt");
+        assert!(
+            run.embeddings
+                .iter()
+                .all(|samples| samples.len() == 2 && samples.iter().all(|e| e == &[1.0_f32, 2.0])),
+            "each prompt should carry its sampled embeddings",
+        );
     }
 
     #[tokio::test]
     async fn run_returns_one_completion_per_prompt() {
         let runner = ProbeRunner::new(Arc::new(EchoProvider));
         let probe = make_test_probe(3);
-        let run = runner.run(&probe, 3).await.unwrap();
+        let run = runner.run(&probe, 3, 2).await.unwrap();
         assert_eq!(run.completions.len(), 3);
         for (i, completion) in run.completions.iter().enumerate() {
             assert_eq!(completion, &format!("prompt {i}"));
@@ -362,7 +374,7 @@ mod tests {
     async fn run_failed_embed_propagates_error() {
         let runner = ProbeRunner::new(Arc::new(FailEmbedProvider));
         let probe = make_test_probe(2);
-        let run = runner.run(&probe, 2).await.unwrap();
+        let run = runner.run(&probe, 2, 2).await.unwrap();
         // all embeds failed — every prompt is counted as failed
         assert_eq!(run.status, RunStatus::Failed);
         assert!(run.embeddings.iter().all(Vec::is_empty));
@@ -382,7 +394,7 @@ mod tests {
 
         let runner = ProbeRunner::new(provider);
         let probe = make_test_probe(6);
-        runner.run(&probe, 2).await.unwrap();
+        runner.run(&probe, 2, 1).await.unwrap();
 
         assert!(
             max_concurrent.load(Ordering::SeqCst) <= 2,
@@ -395,8 +407,8 @@ mod tests {
     async fn run_id_is_unique_across_two_runs() {
         let runner = ProbeRunner::new(Arc::new(EchoProvider));
         let probe = make_test_probe(1);
-        let run_a = runner.run(&probe, 1).await.unwrap();
-        let run_b = runner.run(&probe, 1).await.unwrap();
+        let run_a = runner.run(&probe, 1, 1).await.unwrap();
+        let run_b = runner.run(&probe, 1, 1).await.unwrap();
         assert_ne!(run_a.id, run_b.id);
     }
 

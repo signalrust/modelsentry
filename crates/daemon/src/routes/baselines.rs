@@ -60,7 +60,11 @@ async fn capture_baseline(
     // Newest-first; keep only runs that produced at least one output embedding.
     let mut usable: Vec<&ProbeRun> = runs
         .iter()
-        .filter(|r| r.embeddings.iter().any(|e| !e.is_empty()))
+        .filter(|r| {
+            r.embeddings
+                .iter()
+                .any(|samples| samples.iter().any(|e| !e.is_empty()))
+        })
         .collect();
 
     let newest = usable.first().copied().ok_or_else(|| {
@@ -74,14 +78,16 @@ async fn capture_baseline(
     let dim = run_embedding_dim(newest);
     usable.retain(|r| run_embedding_dim(r) == dim);
 
-    // Build per-prompt clouds: prompt_clouds[i] gathers each run's embedding for
-    // prompt i (skipping prompts that failed in a given run).
+    // Build per-prompt clouds: prompt_clouds[i] gathers every run's sample
+    // embeddings for prompt i (skipping samples/prompts that failed).
     let n_prompts = usable.iter().map(|r| r.embeddings.len()).max().unwrap_or(0);
     let mut prompt_clouds: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n_prompts];
     for run in &usable {
-        for (cloud, emb) in prompt_clouds.iter_mut().zip(run.embeddings.iter()) {
-            if !emb.is_empty() {
-                cloud.push(emb.clone());
+        for (cloud, samples) in prompt_clouds.iter_mut().zip(run.embeddings.iter()) {
+            for sample in samples {
+                if !sample.is_empty() {
+                    cloud.push(sample.clone());
+                }
             }
         }
     }
@@ -101,11 +107,12 @@ async fn capture_baseline(
     Ok((StatusCode::CREATED, Json(baseline)))
 }
 
-/// Embedding dimensionality of a run (length of its first non-empty embedding),
-/// or 0 if the run produced none.
+/// Embedding dimensionality of a run (length of its first non-empty sample
+/// embedding), or 0 if the run produced none.
 fn run_embedding_dim(run: &ProbeRun) -> usize {
     run.embeddings
         .iter()
+        .flat_map(|samples| samples.iter())
         .find(|e| !e.is_empty())
         .map_or(0, Vec::len)
 }

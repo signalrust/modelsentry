@@ -43,7 +43,8 @@ fn make_run_and_baseline(
         probe_id: probe_id.clone(),
         started_at: Utc::now(),
         finished_at: Utc::now(),
-        embeddings: run_embeddings,
+        // One sample per prompt (the n=1 path).
+        embeddings: run_embeddings.into_iter().map(|e| vec![e]).collect(),
         completions: vec!["answer".to_string()],
         drift_report: None,
         status: RunStatus::Success,

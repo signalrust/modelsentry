@@ -55,6 +55,7 @@ impl DriftCalculator {
         let run_dim = run
             .embeddings
             .iter()
+            .flat_map(|samples| samples.iter())
             .find(|e| !e.is_empty())
             .map_or(0, Vec::len);
         if run_dim == 0 {
@@ -110,7 +111,8 @@ mod tests {
             probe_id: ProbeId::new(),
             started_at: Utc::now(),
             finished_at: Utc::now(),
-            embeddings,
+            // One sample per prompt (the n=1 path).
+            embeddings: embeddings.into_iter().map(|e| vec![e]).collect(),
             completions: vec!["answer".to_string()],
             drift_report: None,
             status: RunStatus::Success,

@@ -138,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
         resolver,
         Arc::clone(&calculator),
         Arc::clone(&alert_engine),
+        config.alerts.samples_per_prompt,
     );
     let _scheduler_handle = scheduler.start();
     tracing::info!("scheduler started");

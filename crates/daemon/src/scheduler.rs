@@ -38,6 +38,8 @@ pub struct Scheduler {
     resolver: Arc<dyn ProviderResolver>,
     calculator: Arc<DriftCalculator>,
     alert_engine: Arc<AlertEngine>,
+    /// Completions sampled per prompt per run (drift resolution vs. cost).
+    samples_per_prompt: usize,
 }
 
 /// Handle returned by [`Scheduler::start`].
@@ -57,12 +59,14 @@ impl Scheduler {
         resolver: Arc<dyn ProviderResolver>,
         calculator: Arc<DriftCalculator>,
         alert_engine: Arc<AlertEngine>,
+        samples_per_prompt: usize,
     ) -> Self {
         Self {
             store,
             resolver,
             calculator,
             alert_engine,
+            samples_per_prompt,
         }
     }
 
@@ -80,6 +84,7 @@ impl Scheduler {
         let resolver = Arc::clone(&self.resolver);
         let calculator = Arc::clone(&self.calculator);
         let alert_engine = Arc::clone(&self.alert_engine);
+        let samples_per_prompt = self.samples_per_prompt;
 
         let join_handle = tokio::spawn(async move {
             // Currently-scheduled probe loops, keyed by probe id.
@@ -96,7 +101,14 @@ impl Scheduler {
                         break;
                     }
                     _ = ticker.tick() => {
-                        reconcile(&store, &resolver, &calculator, &alert_engine, &mut active);
+                        reconcile(
+                            &store,
+                            &resolver,
+                            &calculator,
+                            &alert_engine,
+                            samples_per_prompt,
+                            &mut active,
+                        );
                     }
                 }
             }
@@ -126,6 +138,7 @@ fn reconcile(
     resolver: &Arc<dyn ProviderResolver>,
     calculator: &Arc<DriftCalculator>,
     alert_engine: &Arc<AlertEngine>,
+    samples_per_prompt: usize,
     active: &mut HashMap<ProbeId, ActiveProbe>,
 ) {
     let probes = match store.probes().list_all() {
@@ -171,6 +184,7 @@ fn reconcile(
             Arc::clone(resolver),
             Arc::clone(calculator),
             Arc::clone(alert_engine),
+            samples_per_prompt,
         ));
         active.insert(id, ActiveProbe { updated_at, handle });
     }
@@ -195,6 +209,7 @@ async fn run_probe_loop(
     resolver: Arc<dyn ProviderResolver>,
     calculator: Arc<DriftCalculator>,
     alert_engine: Arc<AlertEngine>,
+    samples_per_prompt: usize,
 ) {
     loop {
         tokio::time::sleep(sleep_until_next_run(&probe.schedule)).await;
@@ -212,7 +227,16 @@ async fn run_probe_loop(
             }
         };
 
-        if let Err(e) = run_probe_job(&probe, &store, provider, &calculator, &alert_engine).await {
+        if let Err(e) = run_probe_job(
+            &probe,
+            &store,
+            provider,
+            &calculator,
+            &alert_engine,
+            samples_per_prompt,
+        )
+        .await
+        {
             tracing::error!(probe_id = %probe.id, "scheduler: probe run failed: {e}");
         }
     }
@@ -224,20 +248,24 @@ async fn run_probe_job(
     provider: DynProvider,
     calculator: &DriftCalculator,
     alert_engine: &AlertEngine,
+    samples_per_prompt: usize,
 ) -> Result<()> {
     let has_embeddings = provider.embedding_dim() > 0;
     let runner = ProbeRunner::new(provider);
     let concurrency = PROBE_CONCURRENCY;
 
     let mut run = if has_embeddings {
-        runner.run(probe, concurrency).await?
+        runner.run(probe, concurrency, samples_per_prompt).await?
     } else {
         runner.run_completions_only(probe, concurrency).await?
     };
 
     // Drift detection — only when the run produced at least one output embedding
     // and a baseline exists.
-    let has_output_embeddings = run.embeddings.iter().any(|e| !e.is_empty());
+    let has_output_embeddings = run
+        .embeddings
+        .iter()
+        .any(|samples| samples.iter().any(|e| !e.is_empty()));
     if has_output_embeddings {
         if let Some(baseline) = store.baselines().get_latest_for_probe(&probe.id)? {
             match calculator.compute(&run, &baseline) {
@@ -477,6 +505,7 @@ mod tests {
             Arc::new(StubResolver(provider)),
             Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             Arc::new(AlertEngine::default()),
+            1,
         )
     }
 
@@ -550,6 +579,7 @@ mod tests {
             Arc::new(StubResolver(Arc::new(OkProvider))),
             Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             Arc::new(AlertEngine::default()),
+            1,
         )
         .start();
 

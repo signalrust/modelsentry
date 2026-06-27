@@ -8,6 +8,13 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ### Added
 
+- **Per-prompt multi-sampling removes the single-prompt drift floor.** Each run
+  now samples every prompt `[alerts] samples_per_prompt` times (default 3), so a
+  prompt's drift is scored by a two-sample energy permutation (baseline cloud vs
+  run sample cluster) that resolves to `1/(B+1)` — even a *single* drifted prompt
+  clears small target FPRs, no longer bounded by the `1/(k+1)` conformal rank.
+  `samples_per_prompt = 1` keeps the cheaper single-sample (rank-limited) mode.
+  `ProbeRun.embeddings` is now nested (per prompt → per sample → vector).
 - **Azure OpenAI provider.** Full adapter (deployment-based URLs, `api-version`
   query param, `api-key` auth header, optional embedding deployment for drift).
   Configured via `[providers.azure]` (resource endpoint, api-version, embedding
@@ -15,6 +22,15 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ### Changed
 
+- **Drift gate now resolves the target FPR (calibration fix).** The per-prompt
+  conformal rank is hard-floored at `1/(k+1)`, so the previous Šidák-of-min gate
+  could not alert at the default `target_fpr = 0.01` with `k = 20` baseline runs.
+  The run-level gate is now a **stratified permutation test** of an aggregate
+  statistic `T = Σ max(zᵢ, 0)` over standardized per-prompt excursions (exact
+  under within-prompt exchangeability), with resolution `1/(B+1)`; permutations
+  auto-raise so `1/(B+1) ≤ target_fpr`. Per-prompt conformal p-values are kept
+  for attribution. Adds empirical null-FPR calibration and broad-drift power
+  tests. (Single-prompt-only drift remains information-bounded at `1/(k+1)`.)
 - **Unified provider subsystem.** `ProviderKind` → self-describing `ProviderSpec`
   (the model/deployment and any instance address live in the spec); the dead,
   silently-ignored top-level `Probe.model` field is removed. A single resolver

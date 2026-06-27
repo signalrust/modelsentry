@@ -29,8 +29,12 @@ default_interval_minutes = 60
 # instead of tuning opaque thresholds.
 #
 # target_fpr: a run alerts when its calibrated combined p-value falls below this.
-# It IS your false-positive rate: 0.01 ≈ one false alarm per ~100 stable runs.
-# Lower = fewer, stronger alerts. Must be in the open interval (0, 1).
+# It IS your per-run false-positive rate: 0.01 ≈ one false alarm per ~100 stable
+# runs. Lower = fewer, stronger alerts. Must be in the open interval (0, 1). The
+# gate auto-raises its permutation count so it can always resolve this value;
+# broad (model-wide) drift resolves it easily, while detecting a *single* drifted
+# prompt needs a baseline cloud of ≳ 1/target_fpr runs (see permutations below
+# and docs/DRIFT_DETECTION_METHODOLOGY.md §8).
 target_fpr = 0.01
 # Allow alert webhooks to target private/loopback/link-local addresses.
 # Keep false unless your webhook receiver is on a trusted internal network —
@@ -44,6 +48,11 @@ baseline_capture_runs = 20
 # Permutations for the pooled-fallback two-sample test (higher = more precise
 # p-value, slightly slower).
 permutations = 200
+# Completions sampled per prompt per run. With >= 2, each prompt gets a
+# within-run distribution and the drift test is no longer rank-limited to
+# 1/(k+1) for a single drifted prompt (it resolves to 1/(permutations+1)). Set
+# to 1 to halve/third the provider-call cost at the price of that resolution.
+samples_per_prompt = 3
 
 # --------------------------------------------------------------------------
 # Provider defaults — override model names, base URLs, and token limits.

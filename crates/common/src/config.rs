@@ -72,6 +72,12 @@ pub struct AlertsConfig {
     /// Permutations for the pooled-fallback two-sample test. Defaults to 200.
     #[serde(default = "default_permutations")]
     pub permutations: usize,
+    /// Number of completions sampled per prompt on each run. With ≥2 the drift
+    /// test gains a within-prompt distribution, so even a single drifted prompt
+    /// resolves below the `1/(k+1)` rank floor; `1` keeps the cheaper (but
+    /// rank-limited) single-sample mode. Each sample is one provider call.
+    #[serde(default = "default_samples_per_prompt")]
+    pub samples_per_prompt: usize,
 }
 
 fn default_target_fpr() -> f32 {
@@ -86,6 +92,10 @@ fn default_permutations() -> usize {
     200
 }
 
+fn default_samples_per_prompt() -> usize {
+    3
+}
+
 impl Default for AlertsConfig {
     fn default() -> Self {
         Self {
@@ -93,6 +103,7 @@ impl Default for AlertsConfig {
             allow_private_webhook_targets: false,
             baseline_capture_runs: default_baseline_capture_runs(),
             permutations: default_permutations(),
+            samples_per_prompt: default_samples_per_prompt(),
         }
     }
 }

@@ -152,14 +152,22 @@ impl BaselineSnapshot {
     }
 }
 
-/// Results of a single probe run (one full pass of all prompts)
+/// Results of a single probe run (one full pass of all prompts).
+///
+/// Each prompt is sampled `samples_per_prompt` times, so `embeddings[i]` is the
+/// list of output embeddings for prompt `i` (one per successful sample; possibly
+/// fewer than requested if some samples failed, or empty for a failed/embedding-
+/// less prompt). `completions[i]` keeps one representative completion per prompt
+/// for display and expectation checks. Drawing several samples per prompt gives
+/// the drift test a within-prompt distribution, so a single drifted prompt is no
+/// longer rank-limited to `1/(k+1)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeRun {
     pub id: RunId,
     pub probe_id: ProbeId,
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
-    pub embeddings: Vec<Vec<f32>>,
+    pub embeddings: Vec<Vec<Vec<f32>>>,
     pub completions: Vec<String>,
     pub drift_report: Option<DriftReport>,
     pub status: RunStatus,
@@ -349,7 +357,7 @@ mod tests {
             probe_id: ProbeId::new(),
             started_at: Utc::now(),
             finished_at: Utc::now(),
-            embeddings: vec![vec![0.1, 0.2]],
+            embeddings: vec![vec![vec![0.1, 0.2]]],
             completions: vec!["hello world".to_string()],
             drift_report: None,
             status: RunStatus::Success,

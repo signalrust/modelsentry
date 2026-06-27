@@ -120,7 +120,7 @@ const probeRunSchema = z.object({
   probe_id: z.string(),
   started_at: z.string(),
   finished_at: z.string(),
-  embeddings: z.array(z.array(z.number())),
+  embeddings: z.array(z.array(z.array(z.number()))),
   completions: z.array(z.string()),
   drift_report: driftReportSchema.nullable(),
   status: z.enum(['success', 'partial_failure', 'failed']),

@@ -158,7 +158,7 @@ async fn full_lifecycle_create_probe_capture_baseline_detect_drift() {
         vec![1.0_f32, 0.0, 0.0],
         "Gravity is a fundamental force.",
     )));
-    let baseline_run = baseline_runner.run(&probe, 4).await.unwrap();
+    let baseline_run = baseline_runner.run(&probe, 4, 3).await.unwrap();
     assert_eq!(baseline_run.status, RunStatus::Success);
     store.runs().insert(&baseline_run).unwrap();
 
@@ -176,7 +176,7 @@ async fn full_lifecycle_create_probe_capture_baseline_detect_drift() {
         vec![0.0_f32, 1.0, 0.0], // orthogonal to baseline
         "The quick brown fox jumped over many hurdles today.",
     )));
-    let drift_run = drift_runner.run(&probe, 4).await.unwrap();
+    let drift_run = drift_runner.run(&probe, 4, 3).await.unwrap();
     assert_eq!(drift_run.status, RunStatus::Success);
     store.runs().insert(&drift_run).unwrap();
 
@@ -216,7 +216,7 @@ async fn probe_survives_provider_flake_and_retries() {
         vec![1.0_f32, 0.0, 0.0],
         "some output",
     )));
-    let run = runner.run(&probe, 2).await.unwrap();
+    let run = runner.run(&probe, 2, 3).await.unwrap();
 
     // All embed calls fail → status must not be Success
     assert!(
@@ -241,7 +241,7 @@ async fn delete_probe_also_deletes_associated_runs_and_baselines() {
         probe_id: probe_id.clone(),
         started_at: Utc::now(),
         finished_at: Utc::now(),
-        embeddings: vec![vec![1.0, 0.0, 0.0]],
+        embeddings: vec![vec![vec![1.0, 0.0, 0.0]]],
         completions: vec!["hello".into()],
         drift_report: None,
         status: RunStatus::Success,

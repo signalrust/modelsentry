@@ -289,6 +289,40 @@ pub fn two_sample_test(
     n_permutations: usize,
     seed: u64,
 ) -> Result<TwoSampleOutcome> {
+    let (observed, nulls) = permutation_nulls(baseline, run, kernel, n_permutations, seed)?;
+    let at_least = nulls
+        .iter()
+        .filter(|&&s| s >= observed - PERMUTATION_TOLERANCE)
+        .count();
+    #[allow(clippy::cast_precision_loss)]
+    let p_value = (1.0 + at_least as f32) / (1.0 + n_permutations as f32);
+    Ok(TwoSampleOutcome {
+        statistic: observed,
+        p_value,
+        n_baseline: baseline.len(),
+        n_run: run.len(),
+        n_permutations,
+    })
+}
+
+/// Observed statistic plus the **permutation null distribution** (the `n_perm`
+/// permuted statistics), sharing one Gram matrix.
+///
+/// Exposed for the per-prompt stratified assessment
+/// ([`super::assessment`]), which standardizes the observed statistic against
+/// this null and aggregates across prompts — it needs the whole null, not just
+/// the summary p-value.
+///
+/// # Errors
+///
+/// [`ModelSentryError`] if either group has `< 2` samples or dimensions differ.
+pub fn permutation_nulls(
+    baseline: &[Vec<f32>],
+    run: &[Vec<f32>],
+    kernel: Kernel,
+    n_permutations: usize,
+    seed: u64,
+) -> Result<(f32, Vec<f32>)> {
     validate(baseline, run)?;
     let m = baseline.len();
     let pooled: Vec<Vec<f32>> = baseline.iter().chain(run.iter()).cloned().collect();
@@ -301,24 +335,12 @@ pub fn two_sample_test(
 
     let mut rng = SplitMix64::new(seed);
     let mut perm = identity;
-    let mut at_least = 0usize;
+    let mut nulls = Vec::with_capacity(n_permutations);
     for _ in 0..n_permutations {
         fisher_yates(&mut perm, &mut rng);
-        let stat = statistic_from_gram(&gram, total, &perm, m, unbiased);
-        if stat >= observed - PERMUTATION_TOLERANCE {
-            at_least += 1;
-        }
+        nulls.push(statistic_from_gram(&gram, total, &perm, m, unbiased));
     }
-
-    #[allow(clippy::cast_precision_loss)]
-    let p_value = (1.0 + at_least as f32) / (1.0 + n_permutations as f32);
-    Ok(TwoSampleOutcome {
-        statistic: observed,
-        p_value,
-        n_baseline: m,
-        n_run: run.len(),
-        n_permutations,
-    })
+    Ok((observed, nulls))
 }
 
 /// In-place Fisher–Yates shuffle using the supplied PRNG.
@@ -331,13 +353,15 @@ fn fisher_yates(slice: &mut [usize], rng: &mut SplitMix64) {
 }
 
 /// `SplitMix64` — a tiny, fast, dependency-free PRNG used to keep the
-/// permutation test deterministic and reproducible without pulling in `rand`.
-struct SplitMix64 {
+/// permutation tests deterministic and reproducible without pulling in `rand`.
+/// Shared across the drift module (here and the stratified test in
+/// [`super::assessment`]).
+pub(crate) struct SplitMix64 {
     state: u64,
 }
 
 impl SplitMix64 {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
@@ -351,7 +375,7 @@ impl SplitMix64 {
 
     /// Uniform integer in `[0, bound)` via Lemire's multiply-shift (bias is
     /// negligible for the small bounds used here).
-    fn next_bounded(&mut self, bound: usize) -> usize {
+    pub(crate) fn next_bounded(&mut self, bound: usize) -> usize {
         if bound == 0 {
             return 0;
         }

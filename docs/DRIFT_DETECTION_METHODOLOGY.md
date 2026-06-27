@@ -23,7 +23,7 @@ background. Every term is defined the first time it appears and again in the
 5. [Measuring how different two distributions are (MMD & energy distance)](#5-measuring)
 6. [From a number to a decision: p-values and the permutation test](#6-pvalues)
 7. [Comparing prompt-by-prompt: conformal prediction](#7-conformal)
-8. [Combining evidence across prompts: the Šidák correction](#8-combining)
+8. [Combining evidence across prompts: a stratified permutation gate](#8-combining)
 9. [Turning a p-value into a severity](#9-severity)
 10. [Statistical power and why baselines should span many runs](#10-power)
 11. [Putting it together: the full pipeline](#11-pipeline)
@@ -307,30 +307,51 @@ ability to flag subtle drift.
 ---
 
 <a name="8-combining"></a>
-## 8. Combining evidence across prompts: the Šidák correction
+## 8. Combining evidence across prompts: a stratified permutation gate
 
-Now each prompt has its own p-value `p₁, …, p_P`. We need **one** number for the
-whole run. This is a "multiple comparisons" problem: if you run many tests and
-alert on the smallest p, you'll get false alarms more often than `α` (more
-lottery tickets ⇒ more chance one wins by luck). We must correct for that.
+Now each prompt has its own conformal p-value `p₁, …, p_P`. We need **one** number
+for the whole run, and we need it to *resolve* small false-positive rates. The
+per-prompt conformal rank is exact but **discrete**: with `k` baseline samples its
+smallest possible value is `1/(k+1)` (e.g. `1/21 ≈ 0.048` for `k = 20`). So no
+combination *of the ranks alone* can drive a single prompt's evidence below
+`1/(k+1)` — a naive "correct the minimum" gate would be unable to alert at, say,
+`target_fpr = 0.01` until the baseline held ~100 runs.
 
-We use the **Šidák correction** on the minimum p-value:
+So the per-prompt p-values are kept for **attribution** (which prompt moved), and
+the **alert gate** is computed differently — by a **stratified permutation test**
+that uses the *magnitude* of each prompt's excursion, not just its rank:
 
-```
-combined_p = 1 − (1 − p_min) ^ P
-```
+1. For each prompt, standardize its augmented-set distance scores to `zᵢ`
+   (zero-mean / unit-variance, with a variance floor for near-deterministic
+   baselines), so prompts with different output scales are comparable.
+2. Aggregate: `T = Σ max(zᵢ, 0)` — the total "anomalous excursion" across prompts.
+3. Build the null by resampling, **within each prompt**, which of its `k+1`
+   augmented points is treated as the run point (the exact exchangeability the
+   conformal construction guarantees), recomputing `T` each time.
+4. `combined_p = (1 + #{T_perm ≥ T_obs}) / (B + 1)`.
 
-where `p_min` is the smallest per-prompt p-value and `P` is the number of
-prompts. This inflates the smallest p to account for having looked at `P` of
-them, restoring the promised false-positive rate. It is **powerful when a single
-prompt drifts hard** — exactly the common real failure (one capability breaks)
-— which a naive average would wash out.
+Because the statistic **aggregates across prompts**, broad/model-wide drift —
+where several prompts shift together, the dominant real failure — drives
+`combined_p` to the permutation floor `1/(B+1)` (e.g. `0.005` at `B = 200`), far
+below the single-prompt rank floor. The number of permutations `B` is auto-raised
+so `1/(B+1) ≤ target_fpr`; the gate is therefore never *unable* to alert at the
+chosen FPR.
 
-> **Why not Fisher's method?** Fisher's method (`−2 Σ ln pᵢ`) is the textbook way
-> to *combine* p-values, and it's great when *many* prompts drift a little. But it
-> *dilutes* the case where *one* prompt drifts a lot among many quiet ones —
-> precisely the alert we care most about. Our own unit test caught this, so we use
-> Šidák (sensitive to any single prompt) for the alert decision.
+> **Sampling removes the single-prompt floor.** Each run samples every prompt
+> `samples_per_prompt` times (`[alerts] samples_per_prompt`, default 3). With ≥2
+> samples a prompt's score is a proper **two-sample energy permutation** (its
+> baseline cloud vs the run's sample cluster): when the cluster is separated the
+> observed energy exceeds *every* within-prompt permutation, so even a *single*
+> drifted prompt resolves to `1/(B+1)` — no `1/(k+1)` floor. Set
+> `samples_per_prompt = 1` to fall back to the cheaper rank-based score, which is
+> bounded at `1/(k+1)` for single-prompt-only drift (an information limit of one
+> observation, sharpened only by a larger baseline cloud `k`).
+
+> **Why not Šidák / Fisher closed forms?** Šidák-of-min inherits the `1/(k+1)`
+> floor and assumes independence; Fisher dilutes a single strong prompt among
+> quiet ones. The stratified permutation needs no independence assumption (it
+> resamples within strata), uses magnitude (more powerful), and resolves to
+> `1/(B+1)`.
 
 If the data is too thin for per-prompt testing (single-run baseline, §10), we
 fall back to the pooled MMD/energy permutation test (§6), which yields its own
@@ -399,8 +420,8 @@ much baseline data you give it — capture more runs to detect subtler drift.
    Each scheduled run:
      1. Send every prompt to the model, get the completion.
      2. Embed each completion → one answer-embedding per prompt.
-     3. For each prompt: conformal p-value of the new point vs its baseline cloud.
-     4. Combine per-prompt p-values with Šidák → combined_p.
+     3. For each prompt: conformal p-value (attribution) + standardized excursion.
+     4. Gate: stratified permutation test of T = Σ max(zᵢ,0) → combined_p.
         (If baseline clouds are too small → pooled MMD/energy permutation test.)
      5. Severity from combined_p vs target_fpr.
      6. Alert if combined_p < target_fpr. Fire webhook/Slack with the verdict.

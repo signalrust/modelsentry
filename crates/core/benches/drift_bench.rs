@@ -32,7 +32,8 @@ fn make_run_and_baseline(dim: usize) -> (ProbeRun, BaselineSnapshot) {
         probe_id: probe_id.clone(),
         started_at: Utc::now(),
         finished_at: Utc::now(),
-        embeddings: vec![emb.clone(); 5],
+        // 5 prompts, 3 samples each (the default multi-sample path).
+        embeddings: vec![vec![emb.clone(); 3]; 5],
         completions: vec!["hello world foo bar baz".to_owned(); 5],
         drift_report: None,
         status: RunStatus::Success,

@@ -86,7 +86,9 @@ export interface ProbeRun {
   probe_id: string;
   started_at: string;
   finished_at: string;
-  embeddings: number[][];
+  /** Per prompt → per sample → embedding vector. */
+  embeddings: number[][][];
+  /** One representative completion per prompt. */
   completions: string[];
   drift_report: DriftReport | null;
   status: RunStatus;
