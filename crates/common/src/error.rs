@@ -9,6 +9,13 @@ pub enum ModelSentryError {
     #[error("embedding dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
 
+    #[error(
+        "baseline was captured with a {baseline_dim}-dimensional embedding model but this run \
+         produced {run_dim}-dimensional embeddings — the embedding model changed; re-capture the \
+         baseline for this probe"
+    )]
+    BaselineEmbeddingMismatch { baseline_dim: usize, run_dim: usize },
+
     #[error("empty embedding vector")]
     EmptyEmbedding,
 
@@ -20,6 +27,18 @@ pub enum ModelSentryError {
 
     #[error("storage error: {0}")]
     Storage(#[from] redb::StorageError),
+
+    #[error("database open error: {0}")]
+    DatabaseOpen(#[from] redb::DatabaseError),
+
+    #[error("database transaction error: {0}")]
+    Transaction(#[from] redb::TransactionError),
+
+    #[error("database table error: {0}")]
+    Table(#[from] redb::TableError),
+
+    #[error("database commit error: {0}")]
+    Commit(#[from] redb::CommitError),
 
     #[error("database error: {0}")]
     Db(String),
@@ -59,6 +78,19 @@ mod tests {
         let display = err.to_string();
         assert!(display.contains("1536"));
         assert!(display.contains("768"));
+    }
+
+    #[test]
+    fn baseline_embedding_mismatch_is_actionable() {
+        let err = ModelSentryError::BaselineEmbeddingMismatch {
+            baseline_dim: 1536,
+            run_dim: 3072,
+        };
+        let display = err.to_string();
+        assert!(display.contains("1536"));
+        assert!(display.contains("3072"));
+        // The message must guide the operator toward the fix.
+        assert!(display.contains("re-capture"));
     }
 
     // result_alias_is_model_sentry_error: verified at compile time by the type alias

@@ -31,6 +31,10 @@
   --text-xl:   1.25rem;   /* 20px */
   --text-2xl:  1.5rem;    /* 24px */
   --text-3xl:  2rem;      /* 32px */
+  --text-4xl:  4rem;      /* 64px — hero / error codes */
+
+  /* Border width */
+  --border-width-sm: 2px;
 
   /* Border radius */
   --r-sm:  4px;
@@ -339,6 +343,32 @@ h3 { font-size: var(--text-md); }
 .theme-btn.active {
   background: var(--accent);
   color: #fff;
+}
+
+/* API key button */
+.auth-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0 var(--sp-2);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.auth-btn:hover { border-color: var(--accent); }
+.auth-btn.has-key { border-color: var(--semantic-up); }
+.auth-btn.alert {
+  border-color: var(--semantic-down);
+  animation: auth-pulse 1.2s ease-in-out infinite;
+}
+@keyframes auth-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
 }
 
 /* Hamburger (mobile) */

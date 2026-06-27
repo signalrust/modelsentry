@@ -7,9 +7,23 @@
     none: 'None', low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical',
   };
 
-  function meterPct(value: number, max: number): number {
-    return Math.min(100, Math.round((value / max) * 100));
+  const METHOD_LABELS: Record<string, string> = {
+    per_prompt_conformal: 'Per-prompt conformal',
+    pooled_two_sample: 'Pooled MMD/energy',
+  };
+
+  // Show enough significant figures that a tiny p-value doesn't render as "0".
+  function fmtP(p: number): string {
+    if (p === 0) return '0';
+    if (p < 0.0001) return p.toExponential(2);
+    return p.toFixed(4);
   }
+
+  const methodLabel = $derived(METHOD_LABELS[report.method] ?? report.method);
+  // Sort the per-prompt breakdown by strongest signal (lowest p) first.
+  const sortedPrompts = $derived(
+    [...report.per_prompt].sort((a, b) => a.p_value - b.p_value)
+  );
 </script>
 
 <div class="drift-metrics">
@@ -20,25 +34,40 @@
     </span>
   </div>
 
-  {#each [
-    { label: 'KL Divergence',  value: report.kl_divergence,           max: 2 },
-    { label: 'Cosine Distance', value: report.cosine_distance,         max: 1 },
-    { label: 'Entropy Delta',   value: Math.abs(report.output_entropy_delta), max: 2 },
-  ] as metric}
-    <div class="metric">
-      <div class="metric-header">
-        <span class="metric-label">{metric.label}</span>
-        <span class="metric-value">{metric.value.toFixed(4)}</span>
-      </div>
-      <div class="meter">
-        <div
-          class="meter-fill"
-          data-level={report.drift_level}
-          style="width: {meterPct(metric.value, metric.max)}%"
-        ></div>
-      </div>
+  {#if report.interpretation}
+    <p class="explanation" data-level={report.drift_level}>{report.interpretation}</p>
+  {/if}
+
+  <div class="verdict">
+    <div class="metric-header">
+      <span class="metric-label">Combined p-value</span>
+      <span class="metric-value">{fmtP(report.combined_p_value)}</span>
     </div>
-  {/each}
+    <div class="metric-header">
+      <span class="metric-label">Target FPR</span>
+      <span class="metric-value">{fmtP(report.target_fpr)}</span>
+    </div>
+    <div class="metric-header">
+      <span class="metric-label">Drift Score</span>
+      <span class="metric-value">{report.statistic.toFixed(2)}</span>
+    </div>
+    <div class="metric-header">
+      <span class="metric-label">Method</span>
+      <span class="metric-value method">{methodLabel}</span>
+    </div>
+  </div>
+
+  {#if sortedPrompts.length > 0}
+    <div class="per-prompt">
+      <span class="metric-label">Per-prompt</span>
+      {#each sortedPrompts as pp}
+        <div class="metric-header prompt-row">
+          <span class="prompt-idx">prompt #{pp.prompt_index}</span>
+          <span class="metric-value">p = {fmtP(pp.p_value)} <span class="dim">· n={pp.n_baseline}</span></span>
+        </div>
+      {/each}
+    </div>
+  {/if}
 
   <p class="computed-at">computed {new Date(report.computed_at).toLocaleString()}</p>
 </div>
@@ -56,6 +85,25 @@
     gap: var(--sp-3);
   }
 
+  .explanation {
+    margin: 0;
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    color: var(--text-secondary);
+    background: var(--bg-input);
+    border-left: 3px solid var(--border-strong);
+    border-radius: var(--r-sm);
+  }
+  .explanation[data-level='high'],
+  .explanation[data-level='critical'] {
+    border-left-color: var(--semantic-down);
+  }
+  .explanation[data-level='low'],
+  .explanation[data-level='medium'] {
+    border-left-color: var(--accent);
+  }
+
   .metric-label {
     font-size: var(--text-xs);
     font-weight: 600;
@@ -66,16 +114,23 @@
     white-space: nowrap;
   }
 
-  .metric {
+  .verdict,
+  .per-prompt {
     display: flex;
     flex-direction: column;
     gap: var(--sp-1);
+  }
+
+  .per-prompt {
+    padding-top: var(--sp-2);
+    border-top: 1px solid var(--border);
   }
 
   .metric-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: var(--sp-3);
   }
 
   .metric-value {
@@ -84,6 +139,22 @@
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
     font-family: var(--font-mono);
+  }
+
+  .metric-value.method {
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  .prompt-idx {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+  }
+
+  .dim {
+    color: var(--text-muted);
+    font-weight: 400;
   }
 
   .computed-at {

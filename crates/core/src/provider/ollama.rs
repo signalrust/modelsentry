@@ -10,16 +10,11 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use modelsentry_common::constants::defaults;
 use modelsentry_common::error::{ModelSentryError, Result};
 
 use super::LlmProvider;
 use crate::drift::Embedding;
-
-#[allow(dead_code)]
-const DEFAULT_BASE_URL: &str = "http://localhost:11434";
-/// Per-request HTTP timeout. Longer than the cloud providers because local
-/// first-run generation on CPU can be slow.
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 // ── Public type ───────────────────────────────────────────────────────────────
 
@@ -32,6 +27,7 @@ pub struct OllamaProvider {
     client: reqwest::Client,
     model: String,
     base_url: String,
+    embed_dim: usize,
 }
 
 impl OllamaProvider {
@@ -53,7 +49,9 @@ impl OllamaProvider {
             });
         }
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(
+                defaults::ollama::TIMEOUT_SECS,
+            ))
             .build()
             .map_err(|e| ModelSentryError::Provider {
                 message: format!("failed to build HTTP client: {e}"),
@@ -62,6 +60,7 @@ impl OllamaProvider {
             client,
             model,
             base_url: base_url.into(),
+            embed_dim: defaults::ollama::EMBEDDING_DIM,
         })
     }
 
@@ -69,6 +68,18 @@ impl OllamaProvider {
     #[must_use]
     pub fn with_base_url(self, base_url: String) -> Self {
         Self { base_url, ..self }
+    }
+
+    /// Override the nominal embedding dimension reported by [`embedding_dim`].
+    ///
+    /// Ollama's true embedding width is model-dependent; set it here if you know
+    /// it (query `/api/show` → `embedding_length`). It is used only for the
+    /// has-embeddings capability check, not validated against responses.
+    ///
+    /// [`embedding_dim`]: LlmProvider::embedding_dim
+    #[must_use]
+    pub fn with_embedding_dim(self, embed_dim: usize) -> Self {
+        Self { embed_dim, ..self }
     }
 }
 
@@ -195,17 +206,15 @@ impl LlmProvider for OllamaProvider {
     }
 
     fn provider_name(&self) -> &'static str {
-        "ollama"
+        modelsentry_common::constants::provider::OLLAMA
     }
 
-    /// Returns the model's embedding dimension.
-    ///
-    /// Ollama's embedding dimension depends on the model; we return `1024` as
-    /// a conservative default that covers most popular models (e.g. `nomic-embed-text`).
-    /// Override by querying `/api/show` and reading `embedding_length` if you
-    /// need an exact value.
+    /// Returns the configured nominal embedding dimension (see
+    /// [`OllamaProvider::with_embedding_dim`]). Defaults to a conservative value
+    /// covering popular embedding models; it gates the has-embeddings check and
+    /// is not validated against actual responses, whose width is model-dependent.
     fn embedding_dim(&self) -> usize {
-        1024
+        self.embed_dim
     }
 }
 
@@ -219,7 +228,7 @@ mod tests {
     use super::*;
 
     fn make_provider(base_url: &str) -> OllamaProvider {
-        OllamaProvider::new("llama3", base_url).expect("valid provider config")
+        OllamaProvider::new(defaults::ollama::MODEL, base_url).expect("valid provider config")
     }
 
     fn generate_ok(text: &str) -> serde_json::Value {
@@ -308,7 +317,7 @@ mod tests {
 
     #[test]
     fn empty_model_is_rejected() {
-        let err = OllamaProvider::new("", DEFAULT_BASE_URL).unwrap_err();
+        let err = OllamaProvider::new("", defaults::ollama::BASE_URL).unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
     }
 }

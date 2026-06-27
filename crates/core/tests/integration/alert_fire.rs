@@ -14,24 +14,26 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn make_report(kl: f32, cosine: f32, level: DriftLevel) -> DriftReport {
+fn make_report(combined_p_value: f32, level: DriftLevel) -> DriftReport {
     DriftReport {
         run_id: RunId::new(),
         baseline_id: BaselineId::new(),
-        kl_divergence: kl,
-        cosine_distance: cosine,
-        output_entropy_delta: 0.1,
+        combined_p_value,
+        statistic: -(combined_p_value.max(f32::MIN_POSITIVE)).log10(),
+        target_fpr: 0.01,
+        method: modelsentry_common::constants::method::PER_PROMPT_CONFORMAL.to_string(),
+        per_prompt: Vec::new(),
         drift_level: level,
+        interpretation: String::new(),
         computed_at: Utc::now(),
     }
 }
 
-fn make_rule(webhook_url: String, kl_threshold: f32, cosine_threshold: f32) -> AlertRule {
+fn make_rule(webhook_url: String, target_fpr: f32) -> AlertRule {
     AlertRule {
         id: AlertRuleId::new(),
         probe_id: ProbeId::new(),
-        kl_threshold,
-        cosine_threshold,
+        target_fpr,
         channels: vec![AlertChannel::Webhook { url: webhook_url }],
         active: true,
     }
@@ -53,10 +55,10 @@ async fn webhook_receives_correct_payload_on_drift_event() {
         .await;
 
     let webhook_url = format!("{}/webhook", server.uri());
-    let rule = make_rule(webhook_url, 0.1, 0.15);
+    let rule = make_rule(webhook_url, 0.01);
 
     // Report that clearly exceeds both thresholds
-    let report = make_report(0.5, 0.4, DriftLevel::High);
+    let report = make_report(0.001, DriftLevel::High);
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine.evaluate_and_fire(&report, &[rule]).await;
@@ -84,10 +86,10 @@ async fn inactive_rule_does_not_fire_webhook() {
         .await;
 
     let webhook_url = format!("{}/webhook", server.uri());
-    let mut rule = make_rule(webhook_url, 0.1, 0.15);
+    let mut rule = make_rule(webhook_url, 0.01);
     rule.active = false;
 
-    let report = make_report(0.5, 0.4, DriftLevel::High);
+    let report = make_report(0.001, DriftLevel::High);
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine.evaluate_and_fire(&report, &[rule]).await;
@@ -110,10 +112,10 @@ async fn below_threshold_report_does_not_fire_webhook() {
         .await;
 
     let webhook_url = format!("{}/webhook", server.uri());
-    let rule = make_rule(webhook_url, 1.0, 0.8); // high thresholds
+    let rule = make_rule(webhook_url, 0.01); // high thresholds
 
     // Report well below thresholds
-    let report = make_report(0.05, 0.03, DriftLevel::None);
+    let report = make_report(0.5, DriftLevel::None);
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine.evaluate_and_fire(&report, &[rule]).await;
@@ -140,10 +142,10 @@ async fn webhook_payload_contains_required_fields() {
         .await;
 
     let webhook_url = format!("{}/hook", server.uri());
-    let rule = make_rule(webhook_url, 0.1, 0.15);
+    let rule = make_rule(webhook_url, 0.01);
     let rule_id = rule.id.clone();
 
-    let report = make_report(0.3, 0.2, DriftLevel::Medium);
+    let report = make_report(0.002, DriftLevel::Medium);
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events: Vec<AlertEvent> = engine.evaluate_and_fire(&report, &[rule]).await;
 

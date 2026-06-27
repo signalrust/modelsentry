@@ -11,16 +11,10 @@ use modelsentry_common::{
     types::ApiKey,
 };
 
+use modelsentry_common::constants::defaults;
+
 use super::LlmProvider;
 use crate::drift::Embedding;
-
-const DEFAULT_BASE_URL: &str = "https://api.openai.com";
-/// Default embedding model — 1536-dimensional output.
-const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
-const DEFAULT_EMBEDDING_DIM: usize = 1536;
-const DEFAULT_MAX_TOKENS: u32 = 1024;
-/// Per-request HTTP timeout for the chat/embeddings endpoints.
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 // ── Public type ───────────────────────────────────────────────────────────────
 
@@ -56,7 +50,9 @@ impl OpenAiProvider {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(
+                defaults::openai::TIMEOUT_SECS,
+            ))
             .build()
             .map_err(|e| ModelSentryError::Provider {
                 message: format!("failed to build HTTP client: {e}"),
@@ -66,10 +62,10 @@ impl OpenAiProvider {
             api_key,
             client,
             model,
-            embedding_model: DEFAULT_EMBEDDING_MODEL.to_string(),
-            embed_dim: DEFAULT_EMBEDDING_DIM,
-            base_url: DEFAULT_BASE_URL.to_string(),
-            max_tokens: DEFAULT_MAX_TOKENS,
+            embedding_model: defaults::openai::EMBEDDING_MODEL.to_string(),
+            embed_dim: defaults::openai::EMBEDDING_DIM,
+            base_url: defaults::openai::BASE_URL.to_string(),
+            max_tokens: defaults::MAX_TOKENS,
         })
     }
 
@@ -161,6 +157,9 @@ impl LlmProvider for OpenAiProvider {
     ///
     /// - [`ModelSentryError::Provider`] on network or parse failure.
     /// - [`ModelSentryError::ProviderHttp`] on a non-200 HTTP status.
+    /// - [`ModelSentryError::DimensionMismatch`] if the API returns embeddings
+    ///   of a different width than the configured `embed_dim` (i.e. the
+    ///   embedding model was changed without updating `embedding_dim`).
     async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>> {
         let url = format!("{}/v1/embeddings", self.base_url);
 
@@ -197,7 +196,15 @@ impl LlmProvider for OpenAiProvider {
         parsed
             .data
             .into_iter()
-            .map(|d| Embedding::new(d.embedding))
+            .map(|d| {
+                if d.embedding.len() != self.embed_dim {
+                    return Err(ModelSentryError::DimensionMismatch {
+                        expected: self.embed_dim,
+                        actual: d.embedding.len(),
+                    });
+                }
+                Embedding::new(d.embedding)
+            })
             .collect()
     }
 
@@ -256,7 +263,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn provider_name(&self) -> &'static str {
-        "openai"
+        modelsentry_common::constants::provider::OPENAI
     }
 
     fn embedding_dim(&self) -> usize {
@@ -274,7 +281,7 @@ mod tests {
     use super::*;
 
     fn make_provider(base_url: &str) -> OpenAiProvider {
-        OpenAiProvider::new(ApiKey::new("test-key".into()), "gpt-5.4")
+        OpenAiProvider::new(ApiKey::new("test-key".into()), defaults::openai::MODEL)
             .expect("valid provider config")
             .with_base_url(base_url.to_string())
     }
@@ -329,7 +336,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        OpenAiProvider::new(ApiKey::new("test-key".into()), "gpt-5.4")
+        OpenAiProvider::new(ApiKey::new("test-key".into()), defaults::openai::MODEL)
             .expect("valid provider config")
             .with_base_url(server.uri())
             .with_max_tokens(7)
@@ -348,12 +355,40 @@ mod tests {
             .mount(&server)
             .await;
 
+        // The mock returns a 3-dim vector, so the provider must be configured to
+        // expect 3 dims (the dimension guard rejects a width mismatch).
         let result = make_provider(&server.uri())
+            .with_embedding_model("text-embedding-3-small", 3)
             .embed(&["hello world".into()])
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].as_slice(), vec1.as_slice());
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_dimension_mismatch() {
+        let server = MockServer::start().await;
+        // API returns a 3-dim vector, but the provider expects the default 1536.
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(embed_ok(vec![vec![0.1_f32, 0.2, 0.3]])),
+            )
+            .mount(&server)
+            .await;
+
+        let err = make_provider(&server.uri())
+            .embed(&["text".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ModelSentryError::DimensionMismatch {
+                expected: 1536,
+                actual: 3,
+            }
+        ));
     }
 
     #[tokio::test]

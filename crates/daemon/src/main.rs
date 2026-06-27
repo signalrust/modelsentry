@@ -11,10 +11,14 @@ use std::sync::Arc;
 
 use clap::Parser;
 use modelsentry_common::config::AppConfig;
-use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
+use modelsentry_core::{
+    alert::AlertEngine,
+    drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
+};
 use modelsentry_daemon::{
-    provider_factory::{self, ProviderOverrides},
-    scheduler::{Scheduler, new_registry},
+    constants::alert::HTTP_TIMEOUT_SECS,
+    provider_factory::VaultProviderResolver,
+    scheduler::Scheduler,
     server::{self, AppState},
     vault::Vault,
 };
@@ -41,9 +45,6 @@ struct Cli {
     #[arg(long, env = "MODELSENTRY_VAULT_PASSPHRASE", hide_env_values = true)]
     vault_passphrase: Option<String>,
 }
-
-/// HTTP timeout for the alert/webhook client.
-const ALERT_HTTP_TIMEOUT_SECS: u64 = 10;
 
 #[allow(clippy::too_many_lines)]
 #[tokio::main]
@@ -104,105 +105,37 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Core components (shared via Arc) ───────────────────────────────────
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(ALERT_HTTP_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()?;
-    let calculator = Arc::new(DriftCalculator::new(
-        config.alerts.drift_threshold_kl,
-        config.alerts.drift_threshold_cos,
-    )?);
+    let calculator = Arc::new(DriftCalculator::new(AssessmentConfig {
+        target_fpr: config.alerts.target_fpr,
+        n_permutations: config.alerts.permutations,
+        ..AssessmentConfig::default()
+    }));
     let alert_engine = Arc::new(
         AlertEngine::new(http_client)
             .with_allow_private_targets(config.alerts.allow_private_webhook_targets),
     );
 
-    // ── Providers — load API keys from vault ─────────────────────────────
-    let provider_map = new_registry();
-    let no_overrides = ProviderOverrides::default();
-
-    // OpenAI
-    match vault.get_key("openai") {
-        Ok(Some(key)) => {
-            match provider_factory::build_provider("openai", key, &no_overrides, &config) {
-                Ok(Some(p)) => {
-                    provider_map
-                        .write()
-                        .expect("provider registry poisoned")
-                        .insert("openai".to_string(), p);
-                    tracing::info!("provider registered: openai");
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!("failed to initialise OpenAI provider: {e}"),
-            }
-        }
-        Ok(None) => tracing::debug!("no 'openai' key in vault — openai provider not registered"),
-        Err(e) => tracing::warn!("vault error reading 'openai' key: {e}"),
-    }
-
-    // Anthropic
-    match vault.get_key("anthropic") {
-        Ok(Some(key)) => {
-            match provider_factory::build_provider("anthropic", key, &no_overrides, &config) {
-                Ok(Some(p)) => {
-                    provider_map
-                        .write()
-                        .expect("provider registry poisoned")
-                        .insert("anthropic".to_string(), p);
-                    tracing::info!("provider registered: anthropic");
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!("failed to initialise Anthropic provider: {e}"),
-            }
-        }
-        Ok(None) => {
-            tracing::debug!("no 'anthropic' key in vault — anthropic provider not registered");
-        }
-        Err(e) => tracing::warn!("vault error reading 'anthropic' key: {e}"),
-    }
-
-    // Ollama (no API key — just needs base_url stored as the 'key' value)
-    // Convention: store the base URL as the vault value for provider id 'ollama'.
-    // Falls back to config default if no entry exists.
-    {
-        let base_url = match vault.get_key("ollama") {
-            Ok(Some(key)) => key.expose().to_string(),
-            _ => config.providers.ollama.base_url.clone(),
-        };
-        let ollama_model = match vault.get_key("ollama:model") {
-            Ok(Some(key)) => key.expose().to_string(),
-            _ => config.providers.ollama.model.clone(),
-        };
-        let ollama_overrides = ProviderOverrides {
-            model: Some(ollama_model.clone()),
-            base_url: Some(base_url.clone()),
-        };
-        match provider_factory::build_provider(
-            "ollama",
-            modelsentry_common::types::ApiKey::new(base_url.clone()),
-            &ollama_overrides,
-            &config,
-        ) {
-            Ok(Some(p)) => {
-                provider_map
-                    .write()
-                    .expect("provider registry poisoned")
-                    .insert(format!("ollama:{base_url}"), p);
-                tracing::info!(base_url = %base_url, model = %ollama_model, "provider registered: ollama");
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!("failed to initialise Ollama provider: {e}"),
-        }
-    }
-
-    let providers = Arc::new(provider_map);
-    tracing::info!(
-        registered = providers.read().expect("provider registry poisoned").len(),
-        "provider registry built"
-    );
+    // ── Provider resolution ──────────────────────────────────────────────
+    // Providers are constructed per run from each probe's `ProviderSpec`: the
+    // secret comes from the vault, the infrastructure from config. There is no
+    // registry to populate at startup, and a key added later (via the vault
+    // API) takes effect on the next run with no restart.
+    let config = Arc::new(config);
+    let resolver = Arc::new(VaultProviderResolver::new(
+        Arc::clone(&vault),
+        Arc::clone(&config),
+    ));
 
     // ── Scheduler (shares same Arc'd calculator + alert engine) ────────────
+    tracing::info!(
+        target_fpr = config.alerts.target_fpr,
+        "drift alerting calibrated to target false-positive rate",
+    );
     let scheduler = Scheduler::new(
         Arc::clone(&store),
-        Arc::clone(&providers),
+        resolver,
         Arc::clone(&calculator),
         Arc::clone(&alert_engine),
     );
@@ -213,10 +146,9 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         store,
         vault,
-        providers,
         calculator,
         alert_engine,
-        config: Arc::new(config.clone()),
+        config: Arc::clone(&config),
     };
 
     tracing::info!(

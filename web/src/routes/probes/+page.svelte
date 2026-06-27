@@ -4,6 +4,8 @@
   import type { Probe, ProbeRun } from '$lib/types.js';
   import ProbeTable from '$lib/components/ProbeTable.svelte';
   import AddProbeForm from '$lib/components/AddProbeForm.svelte';
+  import LoadingState from '$lib/components/LoadingState.svelte';
+  import ErrorState from '$lib/components/ErrorState.svelte';
 
   let probes: Probe[] = $state([]);
   let latestRunMap: Record<string, ProbeRun | null> = $state({});
@@ -11,7 +13,9 @@
   let error: string | null = $state(null);
   let showForm = $state(false);
 
-  onMount(async () => {
+  async function load() {
+    loading = true;
+    error = null;
     try {
       probes = await api.probes.list();
       const results = await Promise.all(
@@ -26,7 +30,9 @@
     } finally {
       loading = false;
     }
-  });
+  }
+
+  onMount(load);
 
   function onProbeCreated(probe: Probe) {
     probes = [probe, ...probes];
@@ -58,9 +64,9 @@
 {/if}
 
 {#if loading}
-  <p class="loading-state">Loading…</p>
+  <LoadingState message="Loading probes…" />
 {:else if error}
-  <div class="error-banner">Failed to load probes: {error}</div>
+  <ErrorState message="Failed to load probes: {error}" onretry={load} />
 {:else if probes.length === 0 && !showForm}
   <div class="empty-state">
     No probes yet —

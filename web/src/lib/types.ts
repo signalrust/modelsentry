@@ -15,11 +15,16 @@ export type RunStatus = 'success' | 'partial_failure' | 'failed';
 // Provider / Schedule discriminated unions (match Rust serde tag)
 // ---------------------------------------------------------------------------
 
-export type ProviderKind =
-  | { kind: 'open_ai' }
-  | { kind: 'anthropic' }
-  | { kind: 'ollama'; base_url: string }
-  | { kind: 'azure_open_ai'; endpoint: string; deployment: string };
+export type ProviderSpec =
+  | { kind: 'open_ai'; model: string }
+  | { kind: 'anthropic'; model: string }
+  | { kind: 'ollama'; model: string; base_url: string }
+  | { kind: 'azure'; chat_deployment: string; embedding_deployment?: string | null };
+
+/** User-facing model / deployment name for a spec (mirrors `ProviderSpec::model`). */
+export function providerModel(spec: ProviderSpec): string {
+  return spec.kind === 'azure' ? spec.chat_deployment : spec.model;
+}
 
 export type ProbeSchedule =
   | { kind: 'cron'; expression: string }
@@ -44,21 +49,35 @@ export interface ProbePrompt {
 export interface Probe {
   id: string;
   name: string;
-  provider: ProviderKind;
-  model: string;
+  provider: ProviderSpec;
   prompts: ProbePrompt[];
   schedule: ProbeSchedule;
   created_at: string;
   updated_at: string;
 }
 
+export interface PromptDrift {
+  prompt_index: number;
+  p_value: number;
+  n_baseline: number;
+}
+
 export interface DriftReport {
   run_id: string;
   baseline_id: string;
-  kl_divergence: number;
-  cosine_distance: number;
-  output_entropy_delta: number;
+  /** Calibrated combined p-value for the run (lower ⇒ stronger drift). */
+  combined_p_value: number;
+  /** Drift score = −log₁₀(combined_p_value); higher ⇒ stronger evidence. */
+  statistic: number;
+  /** Target false-positive rate this report was judged against. */
+  target_fpr: number;
+  /** Test that produced the verdict (`per_prompt_conformal` / `pooled_two_sample`). */
+  method: string;
+  /** Per-prompt p-value breakdown (empty in pooled mode). */
+  per_prompt: PromptDrift[];
   drift_level: DriftLevel;
+  /** Human-readable interpretation of the statistical verdict. */
+  interpretation: string;
   computed_at: string;
 }
 
@@ -77,17 +96,22 @@ export interface BaselineSnapshot {
   id: string;
   probe_id: string;
   captured_at: string;
-  embedding_centroid: number[];
-  embedding_variance: number;
-  output_tokens: string[][];
+  /** Schema version; v2 stores per-prompt output-embedding clouds. */
+  schema_version: number;
+  /** Embedding model that produced the clouds. */
+  embedding_model: string;
+  /** Per-prompt output-embedding clouds: prompt_clouds[i] is prompt i's samples. */
+  prompt_clouds: number[][][];
+  /** Number of runs aggregated into this baseline. */
+  n_runs: number;
   run_id: string;
 }
 
 export interface AlertRule {
   id: string;
   probe_id: string;
-  kl_threshold: number;
-  cosine_threshold: number;
+  /** Fire when a run's combined p-value falls below this false-positive rate. */
+  target_fpr: number;
   channels: AlertChannel[];
   active: boolean;
 }
@@ -106,15 +130,13 @@ export interface AlertEvent {
 
 export interface CreateProbeRequest {
   name: string;
-  provider: ProviderKind;
-  model: string;
+  provider: ProviderSpec;
   prompts: ProbePrompt[];
   schedule: ProbeSchedule;
 }
 
 export interface CreateAlertRuleRequest {
-  kl_threshold: number;
-  cosine_threshold: number;
+  target_fpr: number;
   channels: AlertChannel[];
   active?: boolean;
 }

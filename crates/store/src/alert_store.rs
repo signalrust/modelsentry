@@ -6,13 +6,15 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use uuid::Uuid;
 
 use modelsentry_common::{
-    error::{ModelSentryError, Result},
+    error::Result,
     models::{AlertEvent, AlertRule},
     types::{AlertRuleId, ProbeId},
 };
 
-const RULES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("alert_rules");
-const EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("alert_events");
+const RULES_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(modelsentry_common::constants::table::ALERT_RULES);
+const EVENTS_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(modelsentry_common::constants::table::ALERT_EVENTS);
 
 /// Typed CRUD for [`AlertRule`] and [`AlertEvent`] records.
 pub struct AlertRuleStore {
@@ -28,23 +30,16 @@ impl AlertRuleStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] or [`ModelSentryError::Serialization`].
+    /// Returns a database error or a serialization error.
     pub fn insert_rule(&self, rule: &AlertRule) -> Result<()> {
         let bytes = serde_json::to_vec(rule)?;
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn
-                .open_table(RULES_TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(RULES_TABLE)?;
             let id = rule.id.to_string();
             table.insert(id.as_str(), bytes.as_slice())?;
         }
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(())
     }
 
@@ -52,15 +47,10 @@ impl AlertRuleStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn get_rules_for_probe(&self, probe_id: &ProbeId) -> Result<Vec<AlertRule>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-            .open_table(RULES_TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let read_txn = self.db.begin_read()?;
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(RULES_TABLE)?;
         let mut rules = Vec::new();
         for entry in table.iter()? {
             let (_, v) = entry?;
@@ -76,22 +66,15 @@ impl AlertRuleStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction/commit errors.
+    /// Returns a database error on transaction/commit errors.
     pub fn delete_rule(&self, id: &AlertRuleId) -> Result<bool> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         let existed = {
-            let mut table = write_txn
-                .open_table(RULES_TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(RULES_TABLE)?;
             let id_str = id.to_string();
             table.remove(id_str.as_str())?.is_some()
         };
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(existed)
     }
 
@@ -99,23 +82,16 @@ impl AlertRuleStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] or [`ModelSentryError::Serialization`].
+    /// Returns a database error or a serialization error.
     pub fn insert_event(&self, event: &AlertEvent) -> Result<()> {
         let bytes = serde_json::to_vec(event)?;
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn
-                .open_table(EVENTS_TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(EVENTS_TABLE)?;
             let id = event.id.to_string();
             table.insert(id.as_str(), bytes.as_slice())?;
         }
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(())
     }
 
@@ -123,15 +99,10 @@ impl AlertRuleStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn list_events(&self, limit: usize) -> Result<Vec<AlertEvent>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-            .open_table(EVENTS_TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let read_txn = self.db.begin_read()?;
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(EVENTS_TABLE)?;
         let mut events = Vec::new();
         for entry in table.iter()? {
             let (_, v) = entry?;
@@ -146,16 +117,11 @@ impl AlertRuleStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction/commit errors.
+    /// Returns a database error on transaction/commit errors.
     pub fn acknowledge_event(&self, id: &Uuid) -> Result<bool> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         let updated = {
-            let mut table = write_txn
-                .open_table(EVENTS_TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(EVENTS_TABLE)?;
             let id_str = id.to_string();
             // Read into an owned Vec to release the immutable borrow before insert.
             let existing: Option<Vec<u8>> = {
@@ -173,9 +139,7 @@ impl AlertRuleStore {
                 }
             }
         };
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(updated)
     }
 }
@@ -205,8 +169,7 @@ mod tests {
         AlertRule {
             id: AlertRuleId::new(),
             probe_id: probe_id.clone(),
-            kl_threshold: 0.5,
-            cosine_threshold: 0.3,
+            target_fpr: 0.01,
             channels: vec![AlertChannel::Webhook {
                 url: "https://example.com/hook".into(),
             }],
@@ -221,10 +184,13 @@ mod tests {
             drift_report: DriftReport {
                 run_id: RunId::new(),
                 baseline_id: BaselineId::new(),
-                kl_divergence: 1.0,
-                cosine_distance: 0.5,
-                output_entropy_delta: 0.2,
+                combined_p_value: 0.001,
+                statistic: 3.0,
+                target_fpr: 0.01,
+                method: modelsentry_common::constants::method::PER_PROMPT_CONFORMAL.to_string(),
+                per_prompt: Vec::new(),
                 drift_level: DriftLevel::High,
+                interpretation: String::new(),
                 computed_at: Utc::now(),
             },
             fired_at: Utc::now(),

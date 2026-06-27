@@ -4,13 +4,10 @@ use std::sync::Arc;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
-use modelsentry_common::{
-    error::{ModelSentryError, Result},
-    models::Probe,
-    types::ProbeId,
-};
+use modelsentry_common::{error::Result, models::Probe, types::ProbeId};
 
-const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("probes");
+const TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(modelsentry_common::constants::table::PROBES);
 
 /// Typed CRUD for [`Probe`] records.
 pub struct ProbeStore {
@@ -26,24 +23,17 @@ impl ProbeStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction/commit errors or
-    /// [`ModelSentryError::Serialization`] if the model cannot be serialized.
+    /// Returns a database error on transaction/commit errors or
+    /// a serialization error if the model cannot be serialized.
     pub fn insert(&self, probe: &Probe) -> Result<()> {
         let bytes = serde_json::to_vec(probe)?;
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(TABLE)?;
             let id = probe.id.to_string();
             table.insert(id.as_str(), bytes.as_slice())?;
         }
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(())
     }
 
@@ -51,16 +41,11 @@ impl ProbeStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors or
-    /// [`ModelSentryError::Serialization`] on deserialization failure.
+    /// Returns a database error on transaction errors or
+    /// a serialization error on deserialization failure.
     pub fn get(&self, id: &ProbeId) -> Result<Option<Probe>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-            .open_table(TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let read_txn = self.db.begin_read()?;
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(TABLE)?;
         let id_str = id.to_string();
         match table.get(id_str.as_str())? {
             Some(guard) => {
@@ -75,15 +60,10 @@ impl ProbeStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn list_all(&self) -> Result<Vec<Probe>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-            .open_table(TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let read_txn = self.db.begin_read()?;
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(TABLE)?;
         let mut probes = Vec::new();
         for entry in table.iter()? {
             let (_, v) = entry?;
@@ -97,22 +77,15 @@ impl ProbeStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction/commit errors.
+    /// Returns a database error on transaction/commit errors.
     pub fn delete(&self, id: &ProbeId) -> Result<bool> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         let existed = {
-            let mut table = write_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(TABLE)?;
             let id_str = id.to_string();
             table.remove(id_str.as_str())?.is_some()
         };
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(existed)
     }
 
@@ -135,7 +108,8 @@ mod tests {
     use uuid::Uuid;
 
     use modelsentry_common::{
-        models::{Probe, ProbePrompt, ProbeSchedule, ProviderKind},
+        constants::defaults,
+        models::{Probe, ProbePrompt, ProbeSchedule, ProviderSpec},
         types::ProbeId,
     };
 
@@ -152,8 +126,9 @@ mod tests {
         Probe {
             id: ProbeId::new(),
             name: "my-probe".into(),
-            provider: ProviderKind::Anthropic,
-            model: "claude-3-7-sonnet-20250219".into(),
+            provider: ProviderSpec::Anthropic {
+                model: defaults::anthropic::MODEL.into(),
+            },
             prompts: vec![ProbePrompt {
                 id: Uuid::new_v4(),
                 text: "hello".into(),

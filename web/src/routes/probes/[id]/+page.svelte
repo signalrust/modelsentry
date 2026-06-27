@@ -1,10 +1,13 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { page } from '$app/state';
   import { api, ApiError } from '$lib/api.js';
-  import type { Probe, ProbeRun, BaselineSnapshot, AlertEvent } from '$lib/types.js';
+  import { PROVIDER_LABELS, type ProviderKindTag } from '$lib/constants.js';
+  import { providerModel, type Probe, type ProbeRun, type BaselineSnapshot, type AlertEvent } from '$lib/types.js';
   import DriftMetrics from '$lib/components/DriftMetrics.svelte';
   import DriftChart from '$lib/components/DriftChart.svelte';
+  import LoadingState from '$lib/components/LoadingState.svelte';
+  import ErrorState from '$lib/components/ErrorState.svelte';
 
   let probe: Probe | null = $state(null);
   let runs: ProbeRun[] = $state([]);
@@ -27,10 +30,31 @@
     return `every ${p.schedule.minutes} min`;
   }
 
+  function providerLabel(p: Probe): string {
+    return PROVIDER_LABELS[p.provider.kind as ProviderKindTag]
+      ?? p.provider.kind.replaceAll('_', ' ');
+  }
+
+  // Format a p-value with enough precision that a tiny value isn't shown as 0.
+  function fmtP(p: number | undefined | null): string {
+    if (p === undefined || p === null) return '—';
+    if (p === 0) return '0';
+    if (p < 0.0001) return p.toExponential(2);
+    return p.toFixed(4);
+  }
+
+  const TOAST_DURATION_MS = 4000;
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+
   function showToast() {
     toastVisible = true;
-    setTimeout(() => { toastVisible = false; }, 4000);
+    // Clear any in-flight timer so repeated runs don't stack independent timeouts.
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastVisible = false; }, TOAST_DURATION_MS);
   }
+
+  // Cancel the pending toast timer if the user navigates away before it fires.
+  onDestroy(() => clearTimeout(toastTimer));
 
   async function handleRunNow() {
     if (!probeId || runningNow) return;
@@ -49,7 +73,9 @@
     }
   }
 
-  onMount(async () => {
+  async function load() {
+    loading = true;
+    error = null;
     try {
       const id = probeId;
       const [fetchedProbe, fetchedRuns, fetchedEvents] = await Promise.all([
@@ -67,7 +93,9 @@
     } finally {
       loading = false;
     }
-  });
+  }
+
+  onMount(load);
 </script>
 
 <svelte:head>
@@ -88,7 +116,7 @@
     <h1 class="page-title">{probe?.name ?? '…'}</h1>
     {#if probe}
       <p class="page-subtitle">
-        {probe.provider.kind.replace('_', ' ')} · {probe.model} · {scheduleLabel(probe)}
+        {providerLabel(probe)} · {providerModel(probe.provider)} · {scheduleLabel(probe)}
       </p>
     {/if}
   </div>
@@ -108,9 +136,9 @@
 {/if}
 
 {#if loading}
-  <p class="loading-state">Loading…</p>
+  <LoadingState message="Loading probe…" />
 {:else if error}
-  <div class="error-banner">Failed to load probe: {error}</div>
+  <ErrorState message="Failed to load probe: {error}" onretry={load} />
 {:else if probe}
   <div class="two-col-layout">
 
@@ -150,8 +178,8 @@
                 <tr>
                   <th>Started</th>
                   <th>Status</th>
-                  <th>KL Div.</th>
-                  <th>Cosine</th>
+                  <th>Combined p</th>
+                  <th>Score</th>
                   <th>Drift Level</th>
                 </tr>
               </thead>
@@ -164,8 +192,8 @@
                         {run.status.replace('_', ' ')}
                       </span>
                     </td>
-                    <td class="td-num">{run.drift_report?.kl_divergence.toFixed(4) ?? '—'}</td>
-                    <td class="td-num">{run.drift_report?.cosine_distance.toFixed(4) ?? '—'}</td>
+                    <td class="td-num">{fmtP(run.drift_report?.combined_p_value)}</td>
+                    <td class="td-num">{run.drift_report?.statistic.toFixed(2) ?? '—'}</td>
                     <td>
                       {#if run.drift_report}
                         <span class="badge" data-level={run.drift_report.drift_level}>
@@ -214,7 +242,7 @@
                   {/if}
                 </div>
                 <p class="event-meta">
-                  KL {event.drift_report.kl_divergence.toFixed(3)} ·
+                  p {fmtP(event.drift_report.combined_p_value)} ·
                   {new Date(event.fired_at).toLocaleString()}
                 </p>
               </li>
@@ -227,7 +255,12 @@
         <div class="section">
           <h2>Baseline</h2>
           <p class="baseline-meta">Captured {new Date(baseline.captured_at).toLocaleString()}</p>
-          <p class="baseline-meta">Variance {baseline.embedding_variance.toFixed(6)}</p>
+          <p class="baseline-meta">
+            {baseline.prompt_clouds.length} prompt cloud(s) · {baseline.n_runs} run(s)
+          </p>
+          {#if baseline.embedding_model}
+            <p class="baseline-meta">{baseline.embedding_model}</p>
+          {/if}
         </div>
       {/if}
 
@@ -266,15 +299,16 @@
   .constraint {
     font-size: var(--text-xs);
     font-family: var(--font-mono);
-    padding: 2px 8px;
+    padding: var(--sp-1) var(--sp-2);
     border-radius: var(--r-sm);
     display: inline-block;
   }
-  .constraint-ok  { background: rgba(34,197,94,0.1);  color: var(--semantic-up);   }
-  .constraint-err { background: rgba(239,68,68,0.1);  color: var(--semantic-down); }
+  /* Theme-adaptive tints derived from the active theme's semantic colors. */
+  .constraint-ok  { background: color-mix(in srgb, var(--semantic-up) 12%, transparent);   color: var(--semantic-up);   }
+  .constraint-err { background: color-mix(in srgb, var(--semantic-down) 12%, transparent);  color: var(--semantic-down); }
 
   /* Highlighted new run row */
-  tr.highlighted td { background: rgba(59, 130, 246, 0.08); }
+  tr.highlighted td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
   /* Event list */
   .event-list {
@@ -294,7 +328,7 @@
     display: flex;
     align-items: center;
     gap: var(--sp-2);
-    margin-bottom: 4px;
+    margin-bottom: var(--sp-1);
   }
   .event-meta {
     font-size: var(--text-xs);

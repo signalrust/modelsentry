@@ -3,10 +3,10 @@
 //! Sub-modules implement the individual algorithms; [`Embedding`] is the shared
 //! input type used by all of them.
 
+pub mod assessment;
 pub mod calculator;
-pub mod cosine;
-pub mod entropy;
-pub mod kl;
+pub mod interpret;
+pub mod twosample;
 
 use modelsentry_common::error::{ModelSentryError, Result};
 

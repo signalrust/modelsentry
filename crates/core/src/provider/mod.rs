@@ -52,6 +52,7 @@ pub trait LlmProvider: Send + Sync + 'static {
 pub type DynProvider = Arc<dyn LlmProvider>;
 
 pub mod anthropic;
+pub mod azure;
 pub mod ollama;
 pub mod openai;
 

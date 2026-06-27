@@ -24,15 +24,16 @@ use std::{path::Path, sync::Arc};
 
 use redb::{Database, TableDefinition};
 
-use modelsentry_common::error::{ModelSentryError, Result};
+use modelsentry_common::constants::table;
+use modelsentry_common::error::Result;
 use modelsentry_common::types::ProbeId;
 
 // Pre-declare all tables so that a fresh database has them after `open()`.
-const PROBES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("probes");
-const BASELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("baselines");
-const RUNS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("runs");
-const ALERT_RULES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("alert_rules");
-const ALERT_EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("alert_events");
+const PROBES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::PROBES);
+const BASELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::BASELINES);
+const RUNS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::RUNS);
+const ALERT_RULES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::ALERT_RULES);
+const ALERT_EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::ALERT_EVENTS);
 
 /// Combined handle to all store modules.
 ///
@@ -47,10 +48,10 @@ impl AppStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] if the database file cannot be created
+    /// Returns a database error if the database file cannot be created
     /// or opened, or if table initialisation fails.
     pub fn open(path: &Path) -> Result<Self> {
-        let db = Database::create(path).map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let db = Database::create(path)?;
         let store = Self { db: Arc::new(db) };
         store.init_tables()?;
         Ok(store)
@@ -86,7 +87,7 @@ impl AppStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] or [`ModelSentryError::Serialization`].
+    /// Returns a database error or a serialization error.
     pub fn delete_probe_cascade(&self, id: &ProbeId) -> Result<bool> {
         let found = self.probes().delete(id)?;
         if !found {
@@ -100,28 +101,13 @@ impl AppStore {
     /// Eagerly create all tables so that read transactions never encounter
     /// a missing table on a fresh database.
     fn init_tables(&self) -> Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        write_txn
-            .open_table(PROBES_TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        write_txn
-            .open_table(BASELINES_TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        write_txn
-            .open_table(RUNS_TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        write_txn
-            .open_table(ALERT_RULES_TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        write_txn
-            .open_table(ALERT_EVENTS_TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
+        write_txn.open_table(PROBES_TABLE)?;
+        write_txn.open_table(BASELINES_TABLE)?;
+        write_txn.open_table(RUNS_TABLE)?;
+        write_txn.open_table(ALERT_RULES_TABLE)?;
+        write_txn.open_table(ALERT_EVENTS_TABLE)?;
+        write_txn.commit()?;
         Ok(())
     }
 }

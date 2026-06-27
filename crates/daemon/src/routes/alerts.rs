@@ -30,8 +30,9 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRuleRequest {
-    pub kl_threshold: f32,
-    pub cosine_threshold: f32,
+    /// Fire when a run's calibrated combined p-value is below this
+    /// false-positive rate (e.g. `0.01`). Lower ⇒ fewer, stronger alerts.
+    pub target_fpr: f32,
     pub channels: Vec<AlertChannel>,
     #[serde(default = "default_active")]
     pub active: bool,
@@ -70,11 +71,15 @@ async fn create_rule(
     Json(body): Json<CreateRuleRequest>,
 ) -> Result<(StatusCode, Json<AlertRule>), AppError> {
     let probe_id = parse_probe_id(&id)?;
+    if !(body.target_fpr > 0.0 && body.target_fpr < 1.0) {
+        return Err(AppError(ModelSentryError::Config {
+            message: "target_fpr must be in the open interval (0, 1)".to_string(),
+        }));
+    }
     let rule = AlertRule {
         id: AlertRuleId::new(),
         probe_id,
-        kl_threshold: body.kl_threshold,
-        cosine_threshold: body.cosine_threshold,
+        target_fpr: body.target_fpr,
         channels: body.channels,
         active: body.active,
     };
@@ -163,9 +168,11 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    use crate::scheduler::new_registry;
     use crate::server::AppState;
-    use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
+    use modelsentry_core::{
+        alert::AlertEngine,
+        drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
+    };
     use modelsentry_store::AppStore;
 
     fn open_store() -> (tempfile::TempDir, Arc<AppStore>) {
@@ -186,8 +193,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            providers: Arc::new(new_registry()),
-            calculator: Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
+            calculator: Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             alert_engine: Arc::new(AlertEngine::default()),
             config: Arc::new(modelsentry_common::config::AppConfig {
                 server: ServerConfig {
@@ -205,11 +211,7 @@ mod tests {
                 scheduler: SchedulerConfig {
                     default_interval_minutes: 60,
                 },
-                alerts: AlertsConfig {
-                    drift_threshold_kl: 0.5,
-                    drift_threshold_cos: 0.5,
-                    allow_private_webhook_targets: false,
-                },
+                alerts: AlertsConfig::default(),
                 providers: ProvidersConfig::default(),
                 auth: AuthConfig::default(),
             }),
@@ -224,8 +226,7 @@ mod tests {
         let (_vault_dir, server) = test_app(Arc::clone(&store));
 
         let body = json!({
-            "kl_threshold": 0.3,
-            "cosine_threshold": 0.2,
+            "target_fpr": 0.01,
             "channels": [{ "kind": "webhook", "url": "https://example.com/hook" }],
             "active": true
         });
@@ -236,7 +237,7 @@ mod tests {
         resp.assert_status(StatusCode::CREATED);
         let rule: serde_json::Value = resp.json();
         assert!(rule["id"].is_string());
-        assert_eq!(rule["kl_threshold"], 0.3);
+        assert_eq!(rule["target_fpr"], 0.01);
     }
 
     #[tokio::test]

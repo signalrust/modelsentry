@@ -457,7 +457,7 @@ cd web && npm run check
 3. The hook runs the **full check suite:**
    - `cargo fmt --check`
    - `cargo clippy`
-   - `cargo test --workspace` (runs all 192 tests)
+   - `cargo test --workspace` (runs the full workspace suite)
    - `cargo audit` (checks RustSec database)
    - `svelte-check` + `vite build`
    - `npm audit --audit-level=high`

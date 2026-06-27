@@ -1,22 +1,24 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { Chart, type ChartConfiguration } from 'chart.js';
   import 'chart.js/auto';
   import type { ProbeRun, BaselineSnapshot } from '$lib/types.js';
 
-  let { probeId, runs, baseline, klThreshold = 0.5 }: {
+  let { probeId, runs, baseline }: {
     probeId: string;
     runs: ProbeRun[];
     baseline: BaselineSnapshot | null;
-    klThreshold?: number;
   } = $props();
 
   let canvas: HTMLCanvasElement = $state()!;
   let chart: Chart | null = null;
 
-  function getCSSVar(name: string): string {
-    if (typeof document === 'undefined') return '#3b82f6';
-    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#3b82f6';
+  // Resolve a theme CSS variable to its concrete value for Chart.js (which can't
+  // read `var(--…)` directly). Falls back to transparent rather than a frozen
+  // brand color, so nothing hardcoded leaks past the theme.
+  function getCSSVar(name: string, fallback = 'transparent'): string {
+    if (typeof document === 'undefined') return fallback;
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
   }
 
   function buildChart() {
@@ -33,12 +35,20 @@
       }),
     );
 
-    const klValues = sorted.map((r) => r.drift_report?.kl_divergence ?? null);
-    const cosineValues = sorted.map((r) => r.drift_report?.cosine_distance ?? null);
-    const thresholdData = sorted.map(() => klThreshold);
+    // Drift score = −log₁₀(combined p-value): higher ⇒ stronger evidence of
+    // drift, monotone in significance and consistent across both test modes.
+    const scoreValues = sorted.map((r) => r.drift_report?.statistic ?? null);
+    // Significance line at −log₁₀(target_fpr): points above it crossed the
+    // operator's false-positive rate and would alert. Derive from the most
+    // recent report that carries a target FPR.
+    const targetFpr = sorted
+      .map((r) => r.drift_report?.target_fpr)
+      .filter((v): v is number => typeof v === 'number' && v > 0)
+      .at(-1);
+    const sigLine = targetFpr ? -Math.log10(targetFpr) : null;
+    const thresholdData = sorted.map(() => sigLine);
 
     const c1 = getCSSVar('--chart-1');
-    const c4 = getCSSVar('--chart-4');
     const cDown = getCSSVar('--semantic-down');
     const textMuted = getCSSVar('--text-muted');
     const border = getCSSVar('--border');
@@ -49,8 +59,8 @@
         labels,
         datasets: [
           {
-            label: 'KL Divergence',
-            data: klValues,
+            label: 'Drift score (−log₁₀ p)',
+            data: scoreValues,
             borderColor: c1,
             backgroundColor: c1 + '14',
             tension: 0.3,
@@ -59,23 +69,14 @@
             spanGaps: true,
           },
           {
-            label: 'Cosine Distance',
-            data: cosineValues,
-            borderColor: c4,
-            backgroundColor: 'transparent',
-            tension: 0.3,
-            pointRadius: 3,
-            borderDash: [4, 3],
-            spanGaps: true,
-          },
-          {
-            label: 'KL Threshold',
+            label: 'Alert threshold (target FPR)',
             data: thresholdData,
             borderColor: cDown,
             backgroundColor: 'transparent',
             borderDash: [6, 4],
             pointRadius: 0,
             borderWidth: 2,
+            spanGaps: true,
           },
         ],
       },
@@ -113,8 +114,15 @@
     chart = new Chart(canvas, config);
   }
 
-  onMount(() => { buildChart(); });
-  $effect(() => { runs; baseline; buildChart(); });
+  // `$effect` runs after mount and whenever `runs`/`baseline` change, so it
+  // covers the initial build too — no separate `onMount` (which would build the
+  // chart a second, redundant time on first render).
+  $effect(() => {
+    // Reference the reactive inputs so the effect re-runs when they change.
+    void runs;
+    void baseline;
+    buildChart();
+  });
   onDestroy(() => { chart?.destroy(); });
 </script>
 

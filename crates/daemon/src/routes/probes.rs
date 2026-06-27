@@ -9,12 +9,12 @@ use axum::{
 use chrono::Utc;
 use modelsentry_common::{
     error::ModelSentryError,
-    models::{Probe, ProbePrompt, ProbeRun, ProbeSchedule, ProviderKind},
+    models::{Probe, ProbePrompt, ProbeRun, ProbeSchedule, ProviderSpec},
     types::ProbeId,
 };
 use serde::Deserialize;
 
-use crate::{routes::AppError, server::AppState};
+use crate::{provider_factory, routes::AppError, server::AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -30,8 +30,8 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 pub struct CreateProbeRequest {
     pub name: String,
-    pub provider: ProviderKind,
-    pub model: String,
+    /// Full provider target (kind + model/deployment + any instance params).
+    pub provider: ProviderSpec,
     pub prompts: Vec<ProbePrompt>,
     pub schedule: ProbeSchedule,
 }
@@ -54,9 +54,9 @@ async fn create_probe(
             message: "name must not be empty".to_string(),
         }));
     }
-    if body.model.trim().is_empty() {
+    if body.provider.model().trim().is_empty() {
         return Err(AppError(ModelSentryError::Config {
-            message: "model must not be empty".to_string(),
+            message: "model / deployment must not be empty".to_string(),
         }));
     }
     if body.prompts.is_empty() {
@@ -77,7 +77,6 @@ async fn create_probe(
         id: ProbeId::new(),
         name: body.name,
         provider: body.provider,
-        model: body.model,
         prompts: body.prompts,
         schedule: body.schedule,
         created_at: now,
@@ -126,25 +125,11 @@ async fn trigger_probe_run(
         .get(&probe_id)?
         .ok_or_else(|| AppError(ModelSentryError::ProbeNotFound { id: id.clone() }))?;
 
-    let provider_key = provider_key_for(&probe.provider);
-    let provider = state
-        .providers
-        .read()
-        .map_err(|e| {
-            AppError(ModelSentryError::Config {
-                message: format!("provider registry poisoned: {e}"),
-            })
-        })?
-        .get(&provider_key)
-        .cloned()
-        .ok_or_else(|| {
-            AppError(ModelSentryError::Config {
-                message: format!("no provider registered for '{provider_key}'"),
-            })
-        })?;
+    let provider = provider_factory::build_provider(&probe.provider, &state.vault, &state.config)
+        .map_err(AppError)?;
 
     let runner = ProbeRunner::new(provider);
-    let concurrency = 4;
+    let concurrency = crate::constants::runtime::PROBE_CONCURRENCY;
     let run = if runner.has_embeddings() {
         runner.run(&probe, concurrency).await?
     } else {
@@ -164,18 +149,6 @@ fn parse_probe_id(s: &str) -> Result<ProbeId, AppError> {
     Ok(ProbeId::from_uuid(uuid))
 }
 
-fn provider_key_for(kind: &ProviderKind) -> String {
-    match kind {
-        ProviderKind::OpenAi => "openai".to_string(),
-        ProviderKind::Anthropic => "anthropic".to_string(),
-        ProviderKind::Ollama { base_url } => format!("ollama:{base_url}"),
-        ProviderKind::AzureOpenAi {
-            endpoint,
-            deployment,
-        } => format!("azure:{endpoint}:{deployment}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -188,8 +161,11 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    use crate::{scheduler::new_registry, server::AppState};
-    use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
+    use crate::server::AppState;
+    use modelsentry_core::{
+        alert::AlertEngine,
+        drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
+    };
     use modelsentry_store::AppStore;
 
     fn open_store() -> (TempDir, Arc<AppStore>) {
@@ -210,8 +186,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            providers: Arc::new(new_registry()),
-            calculator: Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
+            calculator: Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             alert_engine: Arc::new(AlertEngine::default()),
             config: Arc::new(make_config()),
         };
@@ -240,11 +215,7 @@ mod tests {
             scheduler: SchedulerConfig {
                 default_interval_minutes: 60,
             },
-            alerts: AlertsConfig {
-                drift_threshold_kl: 0.5,
-                drift_threshold_cos: 0.5,
-                allow_private_webhook_targets: false,
-            },
+            alerts: AlertsConfig::default(),
             providers: ProvidersConfig::default(),
             auth: AuthConfig::default(),
         }
@@ -253,8 +224,7 @@ mod tests {
     fn probe_body() -> serde_json::Value {
         json!({
             "name": "test-probe",
-            "provider": { "kind": "anthropic" },
-            "model": "claude-3-5-haiku-20241022",
+            "provider": { "kind": "anthropic", "model": "claude-3-5-haiku-20241022" },
             "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping?", "expected_contains": null, "expected_not_contains": null }],
             "schedule": { "kind": "every_minutes", "minutes": 60 }
         })
@@ -312,7 +282,7 @@ mod tests {
         let (_dir, store) = open_store();
         let (_vault_dir, server) = test_app(store);
         let bad = json!({
-            "name": "t", "provider": { "kind": "anthropic" }, "model": "m",
+            "name": "t", "provider": { "kind": "anthropic", "model": "m" },
             "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping", "expected_contains": null, "expected_not_contains": null }],
             "schedule": { "kind": "cron", "expression": "not a cron" }
         });
@@ -325,7 +295,7 @@ mod tests {
         let (_dir, store) = open_store();
         let (_vault_dir, server) = test_app(store);
         let bad = json!({
-            "name": "t", "provider": { "kind": "anthropic" }, "model": "m",
+            "name": "t", "provider": { "kind": "anthropic", "model": "m" },
             "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping", "expected_contains": null, "expected_not_contains": null }],
             "schedule": { "kind": "every_minutes", "minutes": 0 }
         });
@@ -338,7 +308,7 @@ mod tests {
         let (_dir, store) = open_store();
         let (_vault_dir, server) = test_app(store);
         let good = json!({
-            "name": "t", "provider": { "kind": "anthropic" }, "model": "m",
+            "name": "t", "provider": { "kind": "anthropic", "model": "m" },
             "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping", "expected_contains": null, "expected_not_contains": null }],
             "schedule": { "kind": "cron", "expression": "0 * * * *" }
         });
@@ -351,8 +321,7 @@ mod tests {
         let (_dir, store) = open_store();
         let (_vault_dir, server) = test_app(store);
         let bad = json!({
-            "provider": { "kind": "anthropic" },
-            "model": "m",
+            "provider": { "kind": "anthropic", "model": "m" },
             "prompts": [],
             "schedule": { "kind": "every_minutes", "minutes": 60 }
         });
@@ -366,8 +335,7 @@ mod tests {
         let (_vault_dir, server) = test_app(store);
         let bad = json!({
             "name": "test",
-            "provider": { "kind": "anthropic" },
-            "model": "  ",
+            "provider": { "kind": "anthropic", "model": "  " },
             "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "ping", "expected_contains": null, "expected_not_contains": null }],
             "schedule": { "kind": "every_minutes", "minutes": 60 }
         });
@@ -381,8 +349,7 @@ mod tests {
         let (_vault_dir, server) = test_app(store);
         let bad = json!({
             "name": "test",
-            "provider": { "kind": "anthropic" },
-            "model": "m",
+            "provider": { "kind": "anthropic", "model": "m" },
             "prompts": [],
             "schedule": { "kind": "every_minutes", "minutes": 60 }
         });
@@ -396,8 +363,7 @@ mod tests {
         let (_vault_dir, server) = test_app(store);
         let bad = json!({
             "name": "test",
-            "provider": { "kind": "anthropic" },
-            "model": "m",
+            "provider": { "kind": "anthropic", "model": "m" },
             "prompts": [{ "id": uuid::Uuid::new_v4(), "text": "  ", "expected_contains": null, "expected_not_contains": null }],
             "schedule": { "kind": "every_minutes", "minutes": 60 }
         });

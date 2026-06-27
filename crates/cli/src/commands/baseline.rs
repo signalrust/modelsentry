@@ -44,8 +44,10 @@ struct BaselineRow {
     id: String,
     #[tabled(rename = "Captured At")]
     captured_at: String,
-    #[tabled(rename = "Variance")]
-    variance: String,
+    #[tabled(rename = "Prompts")]
+    prompts: usize,
+    #[tabled(rename = "Runs")]
+    runs: usize,
     #[tabled(rename = "Run ID")]
     run_id: String,
 }
@@ -54,7 +56,8 @@ fn to_row(b: &BaselineSnapshot) -> BaselineRow {
     BaselineRow {
         id: b.id.to_string(),
         captured_at: b.captured_at.to_rfc3339(),
-        variance: format!("{:.6}", b.embedding_variance),
+        prompts: b.prompt_clouds.len(),
+        runs: b.n_runs,
         run_id: b.run_id.to_string(),
     }
 }
@@ -77,12 +80,15 @@ pub async fn handle(args: BaselineArgs, api_url: &str) -> Result<()> {
                 .json()
                 .await?;
 
-            println!("Baseline ID : {}", baseline.id);
-            println!("Probe ID    : {}", baseline.probe_id);
-            println!("Captured    : {}", baseline.captured_at);
-            println!("Run ID      : {}", baseline.run_id);
-            println!("Variance    : {:.6}", baseline.embedding_variance);
-            println!("Centroid dim: {}", baseline.embedding_centroid.len());
+            println!("Baseline ID  : {}", baseline.id);
+            println!("Probe ID     : {}", baseline.probe_id);
+            println!("Captured     : {}", baseline.captured_at);
+            println!("Run ID       : {}", baseline.run_id);
+            println!("Schema ver   : {}", baseline.schema_version);
+            println!("Embed model  : {}", baseline.embedding_model);
+            println!("Prompts      : {}", baseline.prompt_clouds.len());
+            println!("Runs folded  : {}", baseline.n_runs);
+            println!("Embedding dim: {}", baseline.embedding_dim());
         }
 
         BaselineAction::Capture { probe_id } => {
@@ -97,7 +103,11 @@ pub async fn handle(args: BaselineArgs, api_url: &str) -> Result<()> {
                 .await?;
 
             println!("Captured baseline: {}", baseline.id);
-            println!("  Variance: {:.6}", baseline.embedding_variance);
+            println!(
+                "  {} prompt cloud(s) aggregated from {} run(s)",
+                baseline.prompt_clouds.len(),
+                baseline.n_runs
+            );
         }
 
         BaselineAction::List { probe_id } => {

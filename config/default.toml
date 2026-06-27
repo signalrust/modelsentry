@@ -24,15 +24,26 @@ path = ".modelsentry/store.redb"
 default_interval_minutes = 60
 
 [alerts]
-# Default drift thresholds used when creating new alert rules.
-# KL divergence (Gaussian) — recommended starting range: 0.05–0.20
-drift_threshold_kl = 0.10
-# Cosine distance — recommended starting range: 0.10–0.25
-drift_threshold_cos = 0.15
+# Drift detection is a calibrated statistical test (see
+# docs/DRIFT_DETECTION_METHODOLOGY.md). You choose a target false-positive rate
+# instead of tuning opaque thresholds.
+#
+# target_fpr: a run alerts when its calibrated combined p-value falls below this.
+# It IS your false-positive rate: 0.01 ≈ one false alarm per ~100 stable runs.
+# Lower = fewer, stronger alerts. Must be in the open interval (0, 1).
+target_fpr = 0.01
 # Allow alert webhooks to target private/loopback/link-local addresses.
 # Keep false unless your webhook receiver is on a trusted internal network —
 # leaving it false blocks SSRF to cloud-metadata endpoints and localhost.
 allow_private_webhook_targets = false
+# How many recent successful runs to aggregate into a baseline capture. More
+# runs ⇒ richer per-prompt output-embedding clouds ⇒ more statistical power to
+# detect subtle drift. With only 1 run the test falls back to a lower-power
+# pooled mode.
+baseline_capture_runs = 20
+# Permutations for the pooled-fallback two-sample test (higher = more precise
+# p-value, slightly slower).
+permutations = 200
 
 # --------------------------------------------------------------------------
 # Provider defaults — override model names, base URLs, and token limits.
@@ -44,7 +55,10 @@ allow_private_webhook_targets = false
 # gpt-5.4-mini, gpt-5.4-nano (cheapest). gpt-4o is deprecated.
 model = "gpt-5.4"
 # Embeddings: text-embedding-3-small (1536 dims) or text-embedding-3-large
-# (3072 dims). Changing this invalidates existing baselines (dims must match).
+# (3072 dims). embedding_dim MUST match the model's native output dimension.
+# Switching models invalidates existing baselines: drift detection will skip
+# affected probes and log a "re-capture the baseline" warning until you capture
+# a fresh baseline under the new model (`modelsentry baseline capture <id>`).
 embedding_model = "text-embedding-3-small"
 embedding_dim = 1536
 base_url = "https://api.openai.com"
@@ -60,6 +74,21 @@ max_tokens = 1024
 [providers.ollama]
 model = "llama3"
 base_url = "http://localhost:11434"
+
+[providers.azure]
+# Azure OpenAI resource endpoint (no trailing slash). Required for Azure probes.
+# The per-probe chat deployment is chosen when creating the probe; this block
+# holds the deployment-wide infrastructure settings. The API key is stored in
+# the encrypted vault under the 'azure' provider id, not here.
+endpoint = ""
+# Embedding deployment used for drift detection. Leave unset to run Azure probes
+# completions-only (no drift). embedding_dim MUST match the deployment's output
+# dimension (text-embedding-3-small = 1536, text-embedding-3-large = 3072).
+# embedding_deployment = "text-embedding-3-small"
+embedding_dim = 1536
+# REST API version. See Azure OpenAI docs for supported values.
+api_version = "2024-10-21"
+max_tokens = 1024
 
 # --------------------------------------------------------------------------
 # Authentication — protect API endpoints with bearer-token / X-Api-Key auth.

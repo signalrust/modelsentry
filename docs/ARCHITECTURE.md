@@ -1,12 +1,12 @@
 # ModelSentry — Architecture & Engineering Standards
 **Stack:** Rust (workspace) · Axum · Redb · Svelte 5 · SvelteKit  
-**Last updated:** June 26, 2026
+**Last updated:** June 27, 2026
 
 ---
 
 ## 1. System Overview
 
-ModelSentry is a self-hosted daemon that fingerprints LLM API behavior by periodically sending a fixed probe corpus to a configured endpoint, storing the resulting embedding distributions and output classifications, and alerting when any statistical metric drifts beyond a configurable threshold relative to a frozen baseline.
+ModelSentry is a self-hosted daemon that fingerprints LLM API behavior by periodically sending a fixed probe corpus to a configured endpoint, embedding each model **completion**, and comparing the resulting per-prompt output-embedding clouds against a trusted baseline with a **calibrated nonparametric two-sample test**. It alerts when a run's calibrated combined p-value falls below a configured **target false-positive rate** — so the alert threshold has a precise statistical meaning instead of being a hand-tuned magic number. See [`DRIFT_DETECTION_METHODOLOGY.md`](DRIFT_DETECTION_METHODOLOGY.md) for the full theory.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -21,8 +21,8 @@ ModelSentry is a self-hosted daemon that fingerprints LLM API behavior by period
 │                                     ▼                                 │
 │                          ┌──────────────────┐                        │
 │                          │  Drift Calculator │                        │
-│                          │  (KL, cosine,     │                        │
-│                          │   entropy)        │                        │
+│                          │  (conformal +     │                        │
+│                          │   MMD/energy)     │                        │
 │                          └────────┬─────────┘                        │
 │                                   │ DriftReport                      │
 │                          ┌────────▼─────────┐                        │
@@ -83,13 +83,14 @@ modelsentry/
 │   │       │   ├── mod.rs      ← LlmProvider trait (async-trait)
 │   │       │   ├── openai.rs
 │   │       │   ├── anthropic.rs
+│   │       │   ├── azure.rs    ← Azure OpenAI (api-key header, deployment URLs)
 │   │       │   └── ollama.rs
 │   │       ├── drift/
-│   │       │   ├── mod.rs
-│   │       │   ├── calculator.rs ← DriftCalculator, DriftReport
-│   │       │   ├── kl.rs       ← kl_divergence(), gaussian_kl()
-│   │       │   ├── cosine.rs   ← cosine_distance(), centroid()
-│   │       │   └── entropy.rs  ← output_entropy()
+│   │       │   ├── mod.rs        ← Embedding newtype (validated, finite)
+│   │       │   ├── twosample.rs  ← MMD² (RBF/median), energy distance, permutation test
+│   │       │   ├── assessment.rs ← per-prompt conformal + Šidák + pooled fallback + severity
+│   │       │   ├── calculator.rs ← DriftCalculator::compute() → DriftReport
+│   │       │   └── interpret.rs  ← honest statistical-verdict interpretation
 │   │       ├── probe_runner.rs ← ProbeRunner struct
 │   │       └── alert.rs        ← AlertEngine, webhook firing
 │   │
@@ -108,8 +109,9 @@ modelsentry/
 │   │       ├── main.rs
 │   │       ├── server.rs           ← axum router + auth middleware + state
 │   │       ├── scheduler.rs        ← tokio-cron-scheduler integration
+│   │       ├── constants.rs        ← daemon runtime tuning constants
 │   │       ├── vault.rs            ← encrypted API key management (age)
-│   │       ├── provider_factory.rs ← shared provider construction
+│   │       ├── provider_factory.rs ← unified resolver: ProviderSpec → DynProvider
 │   │       └── routes/
 │   │           ├── mod.rs
 │   │           ├── probes.rs
@@ -157,6 +159,7 @@ modelsentry/
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── THRESHOLD_TUNING.md
 │   ├── LOCAL_CI_GUIDE.md
 │   └── RELEASE_READINESS_CHECKLIST.md
 │
@@ -275,11 +278,13 @@ secrecy     = "0.10"
 toml        = "1"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"          # escalate to forbid; core crate gets one override
+unsafe_code = "forbid"          # no unsafe in any crate
 
 [workspace.lints.clippy]
-all      = "warn"
-pedantic = "warn"
+all         = "warn"
+pedantic    = "warn"
+unwrap_used = "warn"            # no .unwrap() in library/runtime code
+panic       = "warn"            # no panic! in library/runtime code
 ```
 
 ### .rustfmt.toml
@@ -347,8 +352,9 @@ path = ".modelsentry/store.redb"
 default_interval_minutes = 60
 
 [alerts]
-drift_threshold_kl = 0.10
-drift_threshold_cos = 0.15
+target_fpr = 0.01            # calibrated false-positive rate; alert when p < this
+baseline_capture_runs = 20   # recent runs aggregated into a baseline capture
+permutations = 200           # pooled-fallback permutation count
 
 [providers.openai]
 model = "gpt-5.4"
@@ -357,13 +363,19 @@ embedding_dim = 1536
 base_url = "https://api.openai.com"
 
 [providers.anthropic]
-model = "claude-sonnet-4-20250514"
+model = "claude-sonnet-4-6"
 base_url = "https://api.anthropic.com"
 api_version = "2023-06-01"
 
 [providers.ollama]
 model = "llama3"
 base_url = "http://localhost:11434"
+
+[providers.azure]
+endpoint = ""                 # https://<resource>.openai.azure.com (required for Azure)
+# embedding_deployment = "..."  # set to enable drift; omit for completions-only
+embedding_dim = 1536
+api_version = "2024-10-21"
 
 [auth]
 enabled = false
@@ -401,16 +413,19 @@ enabled = false
 - Vault encryption round-trip tests in `crates/daemon/src/vault.rs`
 - Must run in `cargo nextest` with no external setup
 
-### Property-Based Tests (proptest)
-- Every drift algorithm must have at least one proptest verifying mathematical invariants:
-  - KL divergence: `kl(p, p) == 0.0`
-  - KL divergence: `kl(p, q) >= 0.0` for all valid p, q
-  - Cosine distance: `cosine_distance(v, v) == 0.0`
-  - Cosine distance: range `[0.0, 1.0]`
+### Property-Based / Invariant Tests
+- Every drift primitive must verify its mathematical invariants:
+  - MMD²/energy: a distribution against itself yields a statistic ≈ 0
+  - Permutation test: the null p-value is (approximately) uniform on `[0, 1]`,
+    so thresholding at α gives FPR ≈ α (FPR-calibration test)
+  - Conformal p-value: rank-valid and bounded below by `1/(cloud_size + 1)`
+  - Šidák combination: monotone in the minimum per-prompt p-value
   - Centroid: dimension preservation
 
 ### Benchmarks (criterion)
-- `crates/core/benches/drift_bench.rs` — benchmark all three drift functions at N=100, 500, 1000 embedding dims
+- `crates/core/benches/drift_bench.rs` — benchmark the end-to-end
+  `DriftCalculator::compute` (conformal + pooled fallback) at N=100, 500, 1536
+  embedding dims
 
 ### CI Test Matrix
 
@@ -454,36 +469,30 @@ Release builds run via `.github/workflows/release.yml`. See [`RELEASE_READINESS_
 
 ## 7. Linter Configuration
 
-All active at `--deny warnings` level in CI. No exceptions without an explicit `#[allow(...)]` with a comment explaining why.
+Lints are declared **once** at the workspace root (`Cargo.toml` `[workspace.lints]`) and inherited by every crate via `[lints] workspace = true` — there are no per-crate-root `#![deny(...)]` attributes to keep in sync. They are set as **warnings** and promoted to hard errors in CI and the git hooks via `cargo clippy --workspace --all-targets -- -D warnings`. No `#[allow(...)]` without a comment explaining why.
 
-### Clippy Lints Enforced
+### Lints Enforced
 
-```rust
-// At crate root of each library crate:
-#![deny(
-    clippy::all,
-    clippy::pedantic,
-    clippy::cargo,
-    // specific high-value extras:
-    clippy::unwrap_used,         // use ? or expect("reason") instead
-    clippy::expect_used,         // only allowed in tests and main.rs
-    clippy::panic,               // no panic! in library code
-    clippy::indexing_slicing,    // use .get() with explicit error handling
-    clippy::arithmetic_side_effects,  // checked arithmetic in drift math
-    clippy::float_arithmetic,    // annotate intentional float math
-    clippy::missing_errors_doc,  // document error conditions in pub fns
-)]
-#![warn(
-    clippy::nursery,
-    clippy::missing_panics_doc,
-)]
-// Binary crates (daemon, cli) are less strict:
-// allow expect_used in main.rs only
+```toml
+# Cargo.toml — [workspace.lints]
+[workspace.lints.rust]
+unsafe_code = "forbid"        # no unsafe anywhere; cannot be re-enabled per-crate
+
+[workspace.lints.clippy]
+all         = "warn"          # the default correctness/style groups
+pedantic    = "warn"          # stricter style/idiom group
+unwrap_used = "warn"          # no .unwrap() in library/runtime code
+panic       = "warn"          # no panic! in library/runtime code
 ```
 
-### Allowed Exceptions (explicit in source)
-- `#[allow(clippy::module_name_repetitions)]` — on structs like `ProbeStore` in `probe_store.rs`
-- `#[allow(clippy::float_arithmetic)]` — on functions in `crates/core/drift/` with a comment citing the formula
+`.clippy.toml` exempts **tests** from the panic-family restrictions (`allow-unwrap-in-tests`, `allow-expect-in-tests`, `allow-panic-in-tests`), and sets `msrv = "1.85"`. `expect("reason")` remains allowed in runtime code for documented invariants (e.g. lock poisoning).
+
+> Note: the restriction lints `clippy::indexing_slicing`, `clippy::arithmetic_side_effects`, and `clippy::float_arithmetic` are **not** enabled — the drift math uses direct float arithmetic and (sparingly) indexing by design. The code still prefers `.get()` and checked patterns where practical, but that is a convention, not a compiler-enforced rule.
+
+### Allowed Exceptions (explicit in source, each with a reason)
+- `#[allow(clippy::doc_markdown)]` — on `constants::provider` / `constants::defaults`, where brand names like "OpenAI" trip the backtick lint.
+- `#[allow(clippy::cast_precision_loss)]` — at `usize → f32/f64` sites in the drift math/tests, where the counts are small and the loss is irrelevant.
+- `#[allow(clippy::module_name_repetitions)]` — on store structs such as `ProbeStore`.
 
 ---
 
@@ -622,7 +631,7 @@ These will be caught in code review if not caught by clippy:
 
 5. **Magic numbers** — embedding dimension hardcoded as `1536` anywhere outside the provider adapter. Use named constants.
 
-6. **Float equality comparison** — `if kl_score == 0.0` in drift logic. Use `< f32::EPSILON` with documentation explaining the tolerance.
+6. **Float equality comparison** — `if mmd_stat == 0.0` in drift logic. Use `< f32::EPSILON` with documentation explaining the tolerance.
 
 7. **Unused `Result` discards** — any `let _ = fallible_fn()` without an explicit comment justifying why the error is intentionally ignored.
 

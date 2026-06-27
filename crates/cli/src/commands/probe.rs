@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use modelsentry_common::models::{DriftLevel, Probe, ProbeRun, ProviderKind};
+use modelsentry_common::models::{DriftLevel, Probe, ProbeRun, ProviderSpec};
 use tabled::{Table, Tabled};
 
 use crate::commands::client;
@@ -74,12 +74,15 @@ struct DriftRow {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn provider_label(p: &ProviderKind) -> String {
+fn provider_label(p: &ProviderSpec) -> String {
+    use modelsentry_common::constants::provider;
     match p {
-        ProviderKind::OpenAi => "openai".to_owned(),
-        ProviderKind::Anthropic => "anthropic".to_owned(),
-        ProviderKind::Ollama { base_url } => format!("ollama ({base_url})"),
-        ProviderKind::AzureOpenAi { deployment, .. } => format!("azure ({deployment})"),
+        ProviderSpec::OpenAi { .. } => provider::OPENAI.to_owned(),
+        ProviderSpec::Anthropic { .. } => provider::ANTHROPIC.to_owned(),
+        ProviderSpec::Ollama { base_url, .. } => format!("{} ({base_url})", provider::OLLAMA),
+        ProviderSpec::Azure {
+            chat_deployment, ..
+        } => format!("{} ({chat_deployment})", provider::AZURE),
     }
 }
 
@@ -107,19 +110,26 @@ fn print_run_result(run: &ProbeRun) {
                 value: drift_label(&report.drift_level).to_owned(),
             },
             DriftRow {
-                metric: "KL Divergence".to_owned(),
-                value: format!("{:.6}", report.kl_divergence),
+                metric: "Combined p-value".to_owned(),
+                value: format!("{:.6}", report.combined_p_value),
             },
             DriftRow {
-                metric: "Cosine Distance".to_owned(),
-                value: format!("{:.6}", report.cosine_distance),
+                metric: "Target FPR".to_owned(),
+                value: format!("{:.6}", report.target_fpr),
             },
             DriftRow {
-                metric: "Entropy Delta".to_owned(),
-                value: format!("{:.6}", report.output_entropy_delta),
+                metric: "Drift Score".to_owned(),
+                value: format!("{:.4}", report.statistic),
+            },
+            DriftRow {
+                metric: "Method".to_owned(),
+                value: report.method.clone(),
             },
         ];
         println!("{}", Table::new(rows));
+        if !report.interpretation.is_empty() {
+            println!("\n{}", report.interpretation);
+        }
     } else {
         println!("(no drift report — baseline may not exist yet)");
     }
@@ -163,7 +173,7 @@ pub async fn handle(args: ProbeArgs, api_url: &str) -> Result<()> {
                     id: probe.id.to_string(),
                     name: probe.name.clone(),
                     provider: provider_label(&probe.provider),
-                    model: probe.model.clone(),
+                    model: probe.provider.model().to_string(),
                     schedule: schedule_label,
                 });
             }

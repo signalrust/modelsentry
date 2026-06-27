@@ -77,9 +77,11 @@ impl AlertEngine {
         events
     }
 
-    /// Returns `true` if the report breaches any threshold defined by `rule`.
+    /// Returns `true` if the run's calibrated p-value clears the rule's target
+    /// false-positive rate (i.e. the drift is statistically significant at the
+    /// operator's chosen FPR).
     fn is_triggered(report: &DriftReport, rule: &AlertRule) -> bool {
-        report.kl_divergence > rule.kl_threshold || report.cosine_distance > rule.cosine_threshold
+        report.combined_p_value < rule.target_fpr
     }
 
     /// Send a notification for `event` to `channel`, logging on failure.
@@ -191,24 +193,26 @@ mod tests {
         types::{AlertRuleId, BaselineId, ProbeId, RunId},
     };
 
-    fn make_report(kl: f32, cos: f32) -> DriftReport {
+    fn make_report(combined_p_value: f32) -> DriftReport {
         DriftReport {
             run_id: RunId::new(),
             baseline_id: BaselineId::new(),
-            kl_divergence: kl,
-            cosine_distance: cos,
-            output_entropy_delta: 0.0,
+            combined_p_value,
+            statistic: -(combined_p_value.max(f32::MIN_POSITIVE)).log10(),
+            target_fpr: 0.01,
+            method: modelsentry_common::constants::method::PER_PROMPT_CONFORMAL.to_string(),
+            per_prompt: Vec::new(),
             drift_level: DriftLevel::None,
+            interpretation: String::new(),
             computed_at: Utc::now(),
         }
     }
 
-    fn make_rule(kl_threshold: f32, cosine_threshold: f32, active: bool) -> AlertRule {
+    fn make_rule(target_fpr: f32, active: bool) -> AlertRule {
         AlertRule {
             id: AlertRuleId::new(),
             probe_id: ProbeId::new(),
-            kl_threshold,
-            cosine_threshold,
+            target_fpr,
             channels: vec![],
             active,
         }
@@ -217,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn no_rules_returns_empty_events() {
         let engine = AlertEngine::default();
-        let report = make_report(1.0, 0.9);
+        let report = make_report(0.001);
         let events = engine.evaluate_and_fire(&report, &[]).await;
         assert!(events.is_empty());
     }
@@ -225,36 +229,27 @@ mod tests {
     #[tokio::test]
     async fn inactive_rule_does_not_fire() {
         let engine = AlertEngine::default();
-        let report = make_report(100.0, 100.0);
-        let rule = make_rule(0.01, 0.01, false);
+        let report = make_report(0.0001); // very significant
+        let rule = make_rule(0.01, false);
         let events = engine.evaluate_and_fire(&report, &[rule]).await;
         assert!(events.is_empty());
     }
 
     #[tokio::test]
-    async fn rule_triggers_when_kl_exceeds_threshold() {
+    async fn rule_triggers_when_p_below_target_fpr() {
         let engine = AlertEngine::default();
-        let report = make_report(1.5, 0.0);
-        let rule = make_rule(1.0, 99.0, true);
+        let report = make_report(0.001); // p < target_fpr
+        let rule = make_rule(0.01, true);
         let events = engine.evaluate_and_fire(&report, &[rule]).await;
         assert_eq!(events.len(), 1);
         assert!(!events[0].acknowledged);
     }
 
     #[tokio::test]
-    async fn rule_triggers_when_cosine_exceeds_threshold() {
+    async fn rule_does_not_fire_when_p_above_target_fpr() {
         let engine = AlertEngine::default();
-        let report = make_report(0.0, 0.9);
-        let rule = make_rule(99.0, 0.5, true);
-        let events = engine.evaluate_and_fire(&report, &[rule]).await;
-        assert_eq!(events.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn rule_does_not_fire_when_below_both_thresholds() {
-        let engine = AlertEngine::default();
-        let report = make_report(0.1, 0.1);
-        let rule = make_rule(1.0, 1.0, true);
+        let report = make_report(0.4); // not significant
+        let rule = make_rule(0.01, true);
         let events = engine.evaluate_and_fire(&report, &[rule]).await;
         assert!(events.is_empty());
     }
@@ -262,8 +257,8 @@ mod tests {
     #[tokio::test]
     async fn event_references_correct_rule() {
         let engine = AlertEngine::default();
-        let report = make_report(10.0, 0.0);
-        let rule = make_rule(1.0, 99.0, true);
+        let report = make_report(0.0005);
+        let rule = make_rule(0.01, true);
         let rule_id = rule.id.clone();
         let events = engine.evaluate_and_fire(&report, &[rule]).await;
         assert_eq!(events[0].rule_id, rule_id);
@@ -286,13 +281,12 @@ mod tests {
 
         // The mock listens on loopback, so the SSRF guard must be relaxed.
         let engine = AlertEngine::default().with_allow_private_targets(true);
-        let report = make_report(5.0, 0.0);
+        let report = make_report(0.0001);
         let url = format!("{}/hook", server.uri());
         let rule = AlertRule {
             id: AlertRuleId::new(),
             probe_id: ProbeId::new(),
-            kl_threshold: 1.0,
-            cosine_threshold: 99.0,
+            target_fpr: 0.01,
             channels: vec![AlertChannel::Webhook { url }],
             active: true,
         };
@@ -397,12 +391,11 @@ mod tests {
             .await;
 
         let engine = AlertEngine::default(); // secure default → blocks loopback
-        let report = make_report(5.0, 0.0);
+        let report = make_report(0.0001);
         let rule = AlertRule {
             id: AlertRuleId::new(),
             probe_id: ProbeId::new(),
-            kl_threshold: 1.0,
-            cosine_threshold: 99.0,
+            target_fpr: 0.01,
             channels: vec![AlertChannel::Webhook {
                 url: format!("{}/hook", server.uri()),
             }],

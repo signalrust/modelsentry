@@ -4,39 +4,38 @@
 //! Entry point: [`Scheduler::start`], which returns a [`SchedulerHandle`] that
 //! can be used to stop the scheduler gracefully.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use cron::Schedule;
 
-use modelsentry_common::error::Result;
-use modelsentry_common::models::{Probe, ProbeSchedule, ProviderKind};
+use modelsentry_common::error::{ModelSentryError, Result};
+use modelsentry_common::models::{Probe, ProbeSchedule};
+use modelsentry_common::types::ProbeId;
 use modelsentry_core::alert::AlertEngine;
 use modelsentry_core::drift::calculator::DriftCalculator;
 use modelsentry_core::probe_runner::ProbeRunner;
 use modelsentry_core::provider::DynProvider;
 use modelsentry_store::AppStore;
 use tokio::sync::oneshot;
-use tokio::task::JoinSet;
+use tokio::task::JoinHandle;
 
-/// Maps a provider identifier (e.g. `"anthropic"`, `"openai"`) to a
-/// [`DynProvider`] implementation.
-pub type ProviderRegistry = RwLock<HashMap<String, DynProvider>>;
-
-/// Convenience constructor for an empty [`ProviderRegistry`].
-#[must_use]
-pub fn new_registry() -> ProviderRegistry {
-    RwLock::new(HashMap::new())
-}
+use crate::constants::runtime::{PROBE_CONCURRENCY, RECONCILE_INTERVAL};
+use crate::provider_factory::ProviderResolver;
 
 /// Tokio-based scheduler that fires [`ProbeRunner`] for each probe on its
 /// configured schedule and writes results back to the store.
+///
+/// Providers are resolved per run from the probe's
+/// [`ProviderSpec`](modelsentry_common::models::ProviderSpec) via the injected
+/// [`ProviderResolver`] — there is no provider registry, so a key added to the
+/// vault takes effect on the next run with no restart.
 pub struct Scheduler {
     store: Arc<AppStore>,
-    providers: Arc<ProviderRegistry>,
+    resolver: Arc<dyn ProviderResolver>,
     calculator: Arc<DriftCalculator>,
     alert_engine: Arc<AlertEngine>,
 }
@@ -55,13 +54,13 @@ impl Scheduler {
     #[must_use]
     pub fn new(
         store: Arc<AppStore>,
-        providers: Arc<ProviderRegistry>,
+        resolver: Arc<dyn ProviderResolver>,
         calculator: Arc<DriftCalculator>,
         alert_engine: Arc<AlertEngine>,
     ) -> Self {
         Self {
             store,
-            providers,
+            resolver,
             calculator,
             alert_engine,
         }
@@ -70,47 +69,35 @@ impl Scheduler {
     /// Start the scheduler. Returns a [`SchedulerHandle`]; call
     /// [`SchedulerHandle::shutdown`] to stop it.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the probe list cannot be loaded from the store on
-    /// startup.
+    /// The scheduler periodically reconciles its running per-probe loops against
+    /// the store (every [`RECONCILE_INTERVAL`]), so probes added, edited, or
+    /// deleted via the API/CLI after startup take effect without a restart.
     #[must_use]
     pub fn start(self) -> SchedulerHandle {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
         let store = Arc::clone(&self.store);
-        let providers = Arc::clone(&self.providers);
+        let resolver = Arc::clone(&self.resolver);
         let calculator = Arc::clone(&self.calculator);
         let alert_engine = Arc::clone(&self.alert_engine);
 
         let join_handle = tokio::spawn(async move {
-            let probes = match store.probes().list_all() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::error!("scheduler: failed to load probes on startup: {e}");
-                    return;
-                }
-            };
+            // Currently-scheduled probe loops, keyed by probe id.
+            let mut active: HashMap<ProbeId, ActiveProbe> = HashMap::new();
+            let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-            let mut set = JoinSet::new();
-            for probe in probes {
-                let store = Arc::clone(&store);
-                let providers = Arc::clone(&providers);
-                let calculator = Arc::clone(&calculator);
-                let alert_engine = Arc::clone(&alert_engine);
-                set.spawn(run_probe_loop(
-                    probe,
-                    store,
-                    providers,
-                    calculator,
-                    alert_engine,
-                ));
-            }
-
-            tokio::select! {
-                _ = &mut shutdown_rx => {
-                    set.abort_all();
-                    while set.join_next().await.is_some() {}
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        for (_, ap) in active.drain() {
+                            ap.handle.abort();
+                        }
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        reconcile(&store, &resolver, &calculator, &alert_engine, &mut active);
+                    }
                 }
             }
         });
@@ -119,6 +106,73 @@ impl Scheduler {
             shutdown_tx,
             join_handle,
         }
+    }
+}
+
+/// A per-probe loop the scheduler is currently running, tracked so it can be
+/// cancelled (probe deleted) or replaced (probe edited).
+struct ActiveProbe {
+    /// The probe's `updated_at` when this loop was spawned; a change means the
+    /// probe was edited and the loop must be respawned with the new definition.
+    updated_at: DateTime<Utc>,
+    handle: JoinHandle<()>,
+}
+
+/// Reconcile the running per-probe loops against the current store contents:
+/// stop loops for deleted probes, (re)spawn loops for new or edited probes, and
+/// leave unchanged probes running.
+fn reconcile(
+    store: &Arc<AppStore>,
+    resolver: &Arc<dyn ProviderResolver>,
+    calculator: &Arc<DriftCalculator>,
+    alert_engine: &Arc<AlertEngine>,
+    active: &mut HashMap<ProbeId, ActiveProbe>,
+) {
+    let probes = match store.probes().list_all() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("scheduler: failed to list probes during reconcile: {e}");
+            return;
+        }
+    };
+
+    let current: HashSet<ProbeId> = probes.iter().map(|p| p.id.clone()).collect();
+
+    // Stop loops whose probe was deleted.
+    active.retain(|id, ap| {
+        if current.contains(id) {
+            true
+        } else {
+            tracing::info!(probe_id = %id, "scheduler: probe removed — stopping its loop");
+            ap.handle.abort();
+            false
+        }
+    });
+
+    // Spawn loops for new probes; respawn for edited ones (schedule may differ).
+    for probe in probes {
+        let needs_spawn = active
+            .get(&probe.id)
+            .is_none_or(|ap| ap.updated_at != probe.updated_at);
+        if !needs_spawn {
+            continue;
+        }
+        if let Some(old) = active.remove(&probe.id) {
+            old.handle.abort();
+            tracing::info!(probe_id = %probe.id, "scheduler: probe changed — rescheduling");
+        } else {
+            tracing::info!(probe_id = %probe.id, "scheduler: probe added — scheduling");
+        }
+        let id = probe.id.clone();
+        let updated_at = probe.updated_at;
+        let handle = tokio::spawn(run_probe_loop(
+            probe,
+            Arc::clone(store),
+            Arc::clone(resolver),
+            Arc::clone(calculator),
+            Arc::clone(alert_engine),
+        ));
+        active.insert(id, ActiveProbe { updated_at, handle });
     }
 }
 
@@ -138,30 +192,24 @@ impl SchedulerHandle {
 async fn run_probe_loop(
     probe: Probe,
     store: Arc<AppStore>,
-    providers: Arc<ProviderRegistry>,
+    resolver: Arc<dyn ProviderResolver>,
     calculator: Arc<DriftCalculator>,
     alert_engine: Arc<AlertEngine>,
 ) {
     loop {
         tokio::time::sleep(sleep_until_next_run(&probe.schedule)).await;
 
-        let key = provider_key(&probe.provider);
-        let provider = match providers.read() {
-            Ok(guard) => guard.get(&key).cloned(),
-            Err(poisoned) => {
+        // Resolve the provider fresh each run so vault/config changes apply
+        // without a restart, and a misconfigured probe never aborts the loop.
+        let provider = match resolver.resolve(&probe.provider) {
+            Ok(p) => p,
+            Err(e) => {
                 tracing::error!(
                     probe_id = %probe.id,
-                    "scheduler: provider registry RwLock poisoned: {poisoned}",
+                    "scheduler: cannot build provider for probe — skipping run: {e}",
                 );
                 continue;
             }
-        };
-        let Some(provider) = provider else {
-            tracing::error!(
-                probe_id = %probe.id,
-                "scheduler: no provider registered for '{key}' — skipping run",
-            );
-            continue;
         };
 
         if let Err(e) = run_probe_job(&probe, &store, provider, &calculator, &alert_engine).await {
@@ -179,7 +227,7 @@ async fn run_probe_job(
 ) -> Result<()> {
     let has_embeddings = provider.embedding_dim() > 0;
     let runner = ProbeRunner::new(provider);
-    let concurrency = 4;
+    let concurrency = PROBE_CONCURRENCY;
 
     let mut run = if has_embeddings {
         runner.run(probe, concurrency).await?
@@ -187,16 +235,42 @@ async fn run_probe_job(
         runner.run_completions_only(probe, concurrency).await?
     };
 
-    // Drift detection — only when we have embeddings and a baseline exists.
-    if !run.embeddings.is_empty() {
+    // Drift detection — only when the run produced at least one output embedding
+    // and a baseline exists.
+    let has_output_embeddings = run.embeddings.iter().any(|e| !e.is_empty());
+    if has_output_embeddings {
         if let Some(baseline) = store.baselines().get_latest_for_probe(&probe.id)? {
-            if let Ok(report) = calculator.compute(&run, &baseline) {
-                let rules = store.alerts().get_rules_for_probe(&probe.id)?;
-                let events = alert_engine.evaluate_and_fire(&report, &rules).await;
-                for event in &events {
-                    store.alerts().insert_event(event)?;
+            match calculator.compute(&run, &baseline) {
+                Ok(report) => {
+                    let rules = store.alerts().get_rules_for_probe(&probe.id)?;
+                    let events = alert_engine.evaluate_and_fire(&report, &rules).await;
+                    for event in &events {
+                        store.alerts().insert_event(event)?;
+                    }
+                    run.drift_report = Some(report);
                 }
-                run.drift_report = Some(report);
+                // The embedding model changed since the baseline was captured —
+                // surface it loudly so the operator re-captures, rather than
+                // silently recording runs with no drift report.
+                Err(ModelSentryError::BaselineEmbeddingMismatch {
+                    baseline_dim,
+                    run_dim,
+                }) => {
+                    tracing::warn!(
+                        probe_id = %probe.id,
+                        baseline_dim,
+                        run_dim,
+                        "scheduler: embedding dimension changed since baseline capture — \
+                         re-capture the baseline for this probe to resume drift detection",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        probe_id = %probe.id,
+                        error = %e,
+                        "scheduler: drift computation skipped",
+                    );
+                }
             }
         }
     }
@@ -262,18 +336,6 @@ fn sleep_until_next_run(schedule: &ProbeSchedule) -> Duration {
     }
 }
 
-fn provider_key(kind: &ProviderKind) -> String {
-    match kind {
-        ProviderKind::OpenAi => "openai".to_string(),
-        ProviderKind::Anthropic => "anthropic".to_string(),
-        ProviderKind::Ollama { base_url } => format!("ollama:{base_url}"),
-        ProviderKind::AzureOpenAi {
-            endpoint,
-            deployment,
-        } => format!("azure:{endpoint}:{deployment}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -288,13 +350,14 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use modelsentry_common::{
+        constants::defaults,
         error::{ModelSentryError, Result},
-        models::{Probe, ProbePrompt, ProbeSchedule, ProviderKind},
+        models::{Probe, ProbePrompt, ProbeSchedule, ProviderSpec},
         types::ProbeId,
     };
     use modelsentry_core::{
         alert::AlertEngine,
-        drift::{Embedding, calculator::DriftCalculator},
+        drift::{Embedding, assessment::AssessmentConfig, calculator::DriftCalculator},
         provider::LlmProvider,
     };
     use modelsentry_store::AppStore;
@@ -347,6 +410,29 @@ mod tests {
         }
     }
 
+    /// Provider that returns a fixed 4-dim embedding and a constant completion,
+    /// so the drift-detection branch of `run_probe_job` is exercised.
+    struct EmbedProvider;
+
+    #[async_trait]
+    impl LlmProvider for EmbedProvider {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>> {
+            texts
+                .iter()
+                .map(|_| Embedding::new(vec![0.05, 0.0, 0.0, 0.0]))
+                .collect()
+        }
+        async fn complete(&self, _: &str) -> Result<String> {
+            Ok("answer".to_string())
+        }
+        fn provider_name(&self) -> &'static str {
+            "test"
+        }
+        fn embedding_dim(&self) -> usize {
+            4
+        }
+    }
+
     // --- helpers ---
 
     fn open_store() -> (TempDir, Arc<AppStore>) {
@@ -360,8 +446,9 @@ mod tests {
         Probe {
             id: ProbeId::new(),
             name: "test-probe".to_string(),
-            provider: ProviderKind::Anthropic,
-            model: "test-model".to_string(),
+            provider: ProviderSpec::Anthropic {
+                model: defaults::anthropic::MODEL.to_string(),
+            },
             prompts: vec![ProbePrompt {
                 id: Uuid::new_v4(),
                 text: "ping?".to_string(),
@@ -374,16 +461,21 @@ mod tests {
         }
     }
 
+    /// Test resolver that hands out a fixed stub provider for any spec, so the
+    /// scheduler loop can be exercised without a vault or network.
+    struct StubResolver(Arc<dyn LlmProvider>);
+
+    impl crate::provider_factory::ProviderResolver for StubResolver {
+        fn resolve(&self, _spec: &ProviderSpec) -> Result<DynProvider> {
+            Ok(Arc::clone(&self.0))
+        }
+    }
+
     fn make_scheduler(store: Arc<AppStore>, provider: Arc<dyn LlmProvider>) -> Scheduler {
-        let registry = Arc::new(new_registry());
-        registry
-            .write()
-            .unwrap()
-            .insert("anthropic".to_string(), provider);
         Scheduler::new(
             store,
-            registry,
-            Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
+            Arc::new(StubResolver(provider)),
+            Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             Arc::new(AlertEngine::default()),
         )
     }
@@ -455,8 +547,8 @@ mod tests {
         let (_dir, store) = open_store();
         let handle = Scheduler::new(
             store,
-            Arc::new(new_registry()),
-            Arc::new(DriftCalculator::new(1.0, 1.0).unwrap()),
+            Arc::new(StubResolver(Arc::new(OkProvider))),
+            Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             Arc::new(AlertEngine::default()),
         )
         .start();
@@ -484,6 +576,94 @@ mod tests {
         }
 
         // Scheduler must still be alive — shutdown must complete.
+        handle.shutdown().await;
+    }
+
+    /// A probe created *after* the scheduler has started must be picked up by
+    /// the reconcile loop and run, without a restart.
+    #[tokio::test(start_paused = true)]
+    async fn scheduler_schedules_probe_added_after_start() {
+        let (_dir, store) = open_store();
+        let handle = make_scheduler(Arc::clone(&store), Arc::new(OkProvider)).start();
+
+        // First reconcile (immediate) finds no probes.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Add a probe after the scheduler is already running.
+        let probe = make_probe(5);
+        let probe_id = probe.id.clone();
+        store.probes().insert(&probe).unwrap();
+
+        // Advance past the reconcile interval so the new probe is scheduled,
+        // then past its run interval so it fires.
+        tokio::time::advance(RECONCILE_INTERVAL).await;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(6 * 60)).await;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        let runs = store.runs().list_for_probe(&probe_id, 10).unwrap();
+        assert!(
+            !runs.is_empty(),
+            "probe added after start should be scheduled and run"
+        );
+
+        handle.shutdown().await;
+    }
+
+    /// When a baseline exists for the probe and the provider returns embeddings,
+    /// the scheduled run must carry a computed drift report.
+    #[tokio::test(start_paused = true)]
+    async fn scheduler_attaches_drift_report_when_baseline_exists() {
+        use modelsentry_common::models::{BASELINE_SCHEMA_VERSION, BaselineSnapshot};
+        use modelsentry_common::types::{BaselineId, RunId};
+
+        let (_dir, store) = open_store();
+        let probe = make_probe(5); // single prompt
+        let probe_id = probe.id.clone();
+        store.probes().insert(&probe).unwrap();
+
+        // One baseline cloud for the single prompt, near the run's embedding.
+        let cloud: Vec<Vec<f32>> = [0.04_f32, 0.042, 0.044, 0.046, 0.048, 0.05]
+            .iter()
+            .map(|&x| vec![x, 0.0, 0.0, 0.0])
+            .collect();
+        let baseline = BaselineSnapshot {
+            id: BaselineId::new(),
+            probe_id: probe_id.clone(),
+            captured_at: Utc::now(),
+            schema_version: BASELINE_SCHEMA_VERSION,
+            embedding_model: "test".to_string(),
+            prompt_clouds: vec![cloud],
+            n_runs: 6,
+            run_id: RunId::new(),
+        };
+        store.baselines().insert(&baseline).unwrap();
+
+        let handle = make_scheduler(Arc::clone(&store), Arc::new(EmbedProvider)).start();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(6 * 60)).await;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        let run = store
+            .runs()
+            .list_for_probe(&probe_id, 1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("a run should have been recorded");
+        assert!(
+            run.drift_report.is_some(),
+            "run should carry a drift report when a baseline exists"
+        );
+
         handle.shutdown().await;
     }
 

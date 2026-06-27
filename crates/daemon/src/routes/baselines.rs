@@ -9,7 +9,7 @@ use axum::{
 use chrono::Utc;
 use modelsentry_common::{
     error::ModelSentryError,
-    models::BaselineSnapshot,
+    models::{BASELINE_SCHEMA_VERSION, BaselineSnapshot, ProbeRun},
     types::{BaselineId, ProbeId},
 };
 
@@ -38,76 +38,76 @@ async fn list_baselines(
     Ok(Json(baselines))
 }
 
-/// Capture a new baseline from the most recent run that has embeddings.
+/// Capture a new baseline by aggregating the most recent successful runs into
+/// per-prompt output-embedding clouds (schema v2).
+///
+/// More runs ⇒ richer clouds ⇒ more statistical power for the conformal drift
+/// test (see the drift-detection methodology). The number of runs folded in is
+/// `[alerts] baseline_capture_runs`. Only runs whose embedding dimension matches
+/// the newest run are aggregated, so a mid-stream embedding-model change never
+/// mixes incompatible vectors into one cloud.
 async fn capture_baseline(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<BaselineSnapshot>), AppError> {
     let probe_id = parse_probe_id(&id)?;
 
-    let run = state
+    let runs = state
         .store
         .runs()
-        .list_for_probe(&probe_id, 1)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            AppError(ModelSentryError::Config {
-                message: "no runs found for probe — run the probe first".to_string(),
-            })
-        })?;
+        .list_for_probe(&probe_id, state.config.alerts.baseline_capture_runs)?;
 
-    let valid_embeddings: Vec<&Vec<f32>> =
-        run.embeddings.iter().filter(|e| !e.is_empty()).collect();
+    // Newest-first; keep only runs that produced at least one output embedding.
+    let mut usable: Vec<&ProbeRun> = runs
+        .iter()
+        .filter(|r| r.embeddings.iter().any(|e| !e.is_empty()))
+        .collect();
 
-    if valid_embeddings.is_empty() {
-        return Err(AppError(ModelSentryError::Config {
-            message: "most recent run has no embeddings — cannot capture baseline".to_string(),
-        }));
-    }
+    let newest = usable.first().copied().ok_or_else(|| {
+        AppError(ModelSentryError::Config {
+            message: "no runs with embeddings found for probe — run the probe first".to_string(),
+        })
+    })?;
 
-    // Compute centroid = component-wise mean.
-    let dim = valid_embeddings[0].len();
-    #[allow(clippy::cast_precision_loss)]
-    let n = valid_embeddings.len() as f32;
-    let mut centroid = vec![0.0_f32; dim];
-    for emb in &valid_embeddings {
-        for (c, v) in centroid.iter_mut().zip(emb.iter()) {
-            *c += v;
+    // Pin the cloud to the newest run's embedding dimension; drop older runs
+    // captured under a different embedding model (different dimension).
+    let dim = run_embedding_dim(newest);
+    usable.retain(|r| run_embedding_dim(r) == dim);
+
+    // Build per-prompt clouds: prompt_clouds[i] gathers each run's embedding for
+    // prompt i (skipping prompts that failed in a given run).
+    let n_prompts = usable.iter().map(|r| r.embeddings.len()).max().unwrap_or(0);
+    let mut prompt_clouds: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n_prompts];
+    for run in &usable {
+        for (cloud, emb) in prompt_clouds.iter_mut().zip(run.embeddings.iter()) {
+            if !emb.is_empty() {
+                cloud.push(emb.clone());
+            }
         }
     }
-    for c in &mut centroid {
-        *c /= n;
-    }
-
-    // Compute variance of L2 norms.
-    let norms: Vec<f32> = valid_embeddings
-        .iter()
-        .map(|e| e.iter().map(|x| x * x).sum::<f32>().sqrt())
-        .collect();
-    let mean_norm = norms.iter().sum::<f32>() / n;
-    let variance = norms
-        .iter()
-        .map(|norm| (norm - mean_norm).powi(2))
-        .sum::<f32>()
-        / n;
 
     let baseline = BaselineSnapshot {
         id: BaselineId::new(),
         probe_id: probe_id.clone(),
         captured_at: Utc::now(),
-        embedding_centroid: centroid,
-        embedding_variance: variance,
-        output_tokens: run
-            .completions
-            .iter()
-            .map(|c| c.split_whitespace().map(str::to_lowercase).collect())
-            .collect(),
-        run_id: run.id.clone(),
+        schema_version: BASELINE_SCHEMA_VERSION,
+        embedding_model: state.config.providers.openai.embedding_model.clone(),
+        prompt_clouds,
+        n_runs: usable.len(),
+        run_id: newest.id.clone(),
     };
 
     state.store.baselines().insert(&baseline)?;
     Ok((StatusCode::CREATED, Json(baseline)))
+}
+
+/// Embedding dimensionality of a run (length of its first non-empty embedding),
+/// or 0 if the run produced none.
+fn run_embedding_dim(run: &ProbeRun) -> usize {
+    run.embeddings
+        .iter()
+        .find(|e| !e.is_empty())
+        .map_or(0, Vec::len)
 }
 
 async fn get_latest_baseline(
@@ -168,13 +168,16 @@ mod tests {
             AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig,
             ServerConfig, VaultConfig,
         },
-        models::{Probe, ProbeSchedule, ProviderKind},
+        constants::defaults,
+        models::{Probe, ProbeSchedule, ProviderSpec},
     };
     use std::sync::Arc;
 
-    use crate::scheduler::new_registry;
     use crate::server::AppState;
-    use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
+    use modelsentry_core::{
+        alert::AlertEngine,
+        drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
+    };
     use modelsentry_store::AppStore;
 
     fn open_store() -> (tempfile::TempDir, Arc<AppStore>) {
@@ -195,8 +198,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            providers: Arc::new(new_registry()),
-            calculator: Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
+            calculator: Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             alert_engine: Arc::new(AlertEngine::default()),
             config: Arc::new(modelsentry_common::config::AppConfig {
                 server: ServerConfig {
@@ -214,11 +216,7 @@ mod tests {
                 scheduler: SchedulerConfig {
                     default_interval_minutes: 60,
                 },
-                alerts: AlertsConfig {
-                    drift_threshold_kl: 0.5,
-                    drift_threshold_cos: 0.5,
-                    allow_private_webhook_targets: false,
-                },
+                alerts: AlertsConfig::default(),
                 providers: ProvidersConfig::default(),
                 auth: AuthConfig::default(),
             }),
@@ -230,8 +228,9 @@ mod tests {
         let probe = Probe {
             id: modelsentry_common::types::ProbeId::new(),
             name: "p".to_string(),
-            provider: ProviderKind::Anthropic,
-            model: "m".to_string(),
+            provider: ProviderSpec::Anthropic {
+                model: defaults::anthropic::MODEL.to_string(),
+            },
             prompts: vec![],
             schedule: ProbeSchedule::EveryMinutes { minutes: 60 },
             created_at: Utc::now(),

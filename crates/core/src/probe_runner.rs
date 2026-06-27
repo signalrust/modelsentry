@@ -76,8 +76,16 @@ impl ProbeRunner {
                             message: "semaphore closed".to_string(),
                         }
                     })?;
-                    let embed = prov.embed(std::slice::from_ref(&text)).await;
+                    // Drift is measured on the model's OUTPUT, so we complete
+                    // first and embed the completion — never the (fixed) prompt.
                     let complete = prov.complete(&text).await;
+                    let embed = match &complete {
+                        Ok(answer) if !answer.is_empty() => {
+                            prov.embed(std::slice::from_ref(answer)).await
+                        }
+                        // No usable completion → no embedding for this prompt.
+                        _ => Ok(Vec::new()),
+                    };
                     Ok::<_, modelsentry_common::error::ModelSentryError>((embed, complete))
                 }
             })
@@ -222,8 +230,9 @@ mod tests {
     use uuid::Uuid;
 
     use modelsentry_common::{
+        constants::defaults,
         error::{ModelSentryError, Result},
-        models::{Probe, ProbePrompt, ProbeSchedule, ProviderKind, RunStatus},
+        models::{Probe, ProbePrompt, ProbeSchedule, ProviderSpec, RunStatus},
         types::ProbeId,
     };
 
@@ -237,8 +246,9 @@ mod tests {
         Probe {
             id: ProbeId::new(),
             name: "test-probe".into(),
-            provider: ProviderKind::Anthropic,
-            model: "claude-3-7-sonnet-20250219".into(),
+            provider: ProviderSpec::Anthropic {
+                model: defaults::anthropic::MODEL.into(),
+            },
             prompts: (0..n_prompts)
                 .map(|i| ProbePrompt {
                     id: Uuid::new_v4(),

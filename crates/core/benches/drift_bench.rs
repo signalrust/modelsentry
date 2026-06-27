@@ -1,4 +1,5 @@
-// Criterion benchmarks for the three drift algorithms at representative embedding sizes.
+// Criterion benchmark for the calibrated drift pipeline at representative
+// embedding sizes.
 //
 // Run with: cargo bench -p modelsentry-core
 
@@ -12,23 +13,9 @@ use modelsentry_common::{
     models::{BaselineSnapshot, ProbeRun, RunStatus},
     types::{BaselineId, ProbeId, RunId},
 };
-use modelsentry_core::drift::{
-    Embedding, calculator::DriftCalculator, cosine::cosine_distance, entropy::entropy_delta,
-    kl::gaussian_kl,
-};
+use modelsentry_core::drift::{assessment::AssessmentConfig, calculator::DriftCalculator};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
-
-fn unit_embedding(dim: usize) -> Embedding {
-    let mut v = vec![0.0_f32; dim];
-    v[0] = 1.0;
-    Embedding::new(v).unwrap()
-}
-
-#[allow(dead_code)]
-fn embeddings(dim: usize, count: usize) -> Vec<Embedding> {
-    (0..count).map(|_| unit_embedding(dim)).collect()
-}
 
 fn make_run_and_baseline(dim: usize) -> (ProbeRun, BaselineSnapshot) {
     let probe_id = ProbeId::new();
@@ -51,16 +38,32 @@ fn make_run_and_baseline(dim: usize) -> (ProbeRun, BaselineSnapshot) {
         status: RunStatus::Success,
     };
 
+    // 5 prompts, each with a baseline cloud of 20 jittered samples.
+    let prompt_clouds: Vec<Vec<Vec<f32>>> = (0..5)
+        .map(|_| {
+            (0..20)
+                .map(|i| {
+                    let mut v = emb.clone();
+                    if let Some(first) = v.first_mut() {
+                        #[allow(clippy::cast_precision_loss)]
+                        {
+                            *first += (i as f32) * 0.0005;
+                        }
+                    }
+                    v
+                })
+                .collect()
+        })
+        .collect();
+
     let baseline = BaselineSnapshot {
         id: BaselineId::new(),
         probe_id,
         captured_at: Utc::now(),
-        embedding_centroid: emb,
-        embedding_variance: 0.01,
-        output_tokens: vec![
-            vec!["hello".into(), "world".into(), "foo".into()],
-            vec!["hello".into(), "world".into(), "foo".into()],
-        ],
+        schema_version: modelsentry_common::models::BASELINE_SCHEMA_VERSION,
+        embedding_model: "bench".to_owned(),
+        prompt_clouds,
+        n_runs: 20,
         run_id,
     };
 
@@ -69,65 +72,9 @@ fn make_run_and_baseline(dim: usize) -> (ProbeRun, BaselineSnapshot) {
 
 // ── Benchmark groups ──────────────────────────────────────────────────────────
 
-fn bench_kl_divergence(c: &mut Criterion) {
-    let mut group = c.benchmark_group("kl_divergence");
-
-    for &n in &[100_usize, 500, 1536] {
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            // Gaussian KL is O(1) but we benchmark with realistic mu/sigma values
-            // that would result from n-dimensional embeddings.
-            let mu1 = 1.0_f32;
-            let sigma1 = 0.1_f32;
-            #[allow(clippy::cast_precision_loss)]
-            let mu2 = 1.0_f32 + (n as f32).sqrt() * 0.001;
-            let sigma2 = 0.1_f32;
-            b.iter(|| gaussian_kl(mu1, sigma1, mu2, sigma2).unwrap());
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_cosine_distance(c: &mut Criterion) {
-    let mut group = c.benchmark_group("cosine_distance");
-
-    for &n in &[100_usize, 500, 1536] {
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            let a = unit_embedding(n);
-            // Slightly rotated vector
-            let mut raw = vec![0.0_f32; n];
-            raw[0] = 0.9;
-            if n > 1 {
-                raw[1] = 0.1;
-            }
-            let b_emb = Embedding::new(raw).unwrap();
-            b.iter(|| cosine_distance(&a, &b_emb).unwrap());
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_output_entropy(c: &mut Criterion) {
-    let mut group = c.benchmark_group("output_entropy");
-
-    for &n in &[10_usize, 50, 100] {
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            // n completions of 20 tokens each
-            let completions: Vec<Vec<String>> = (0..n)
-                .map(|i| (0..20).map(|j| format!("tok_{}", (i + j) % 15)).collect())
-                .collect();
-            let baseline_tokens: Vec<Vec<String>> = completions.clone();
-            b.iter(|| entropy_delta(&completions, &baseline_tokens).unwrap());
-        });
-    }
-
-    group.finish();
-}
-
 fn bench_drift_calculator_compute(c: &mut Criterion) {
     let mut group = c.benchmark_group("drift_calculator_compute");
-    let calc = DriftCalculator::new(0.5, 0.3).unwrap();
+    let calc = DriftCalculator::new(AssessmentConfig::default());
 
     for &dim in &[100_usize, 500, 1536] {
         group.bench_with_input(BenchmarkId::from_parameter(dim), &dim, |b, &dim| {
@@ -139,11 +86,5 @@ fn bench_drift_calculator_compute(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_kl_divergence,
-    bench_cosine_distance,
-    bench_output_entropy,
-    bench_drift_calculator_compute,
-);
+criterion_group!(benches, bench_drift_calculator_compute);
 criterion_main!(benches);

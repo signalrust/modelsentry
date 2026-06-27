@@ -5,12 +5,13 @@ use std::sync::Arc;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use modelsentry_common::{
-    error::{ModelSentryError, Result},
+    error::Result,
     models::ProbeRun,
     types::{ProbeId, RunId},
 };
 
-const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("runs");
+const TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(modelsentry_common::constants::table::RUNS);
 
 /// Typed CRUD for [`ProbeRun`] records.
 pub struct RunStore {
@@ -26,23 +27,16 @@ impl RunStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] or [`ModelSentryError::Serialization`].
+    /// Returns a database error or a serialization error.
     pub fn insert(&self, run: &ProbeRun) -> Result<()> {
         let bytes = serde_json::to_vec(run)?;
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(TABLE)?;
             let id = run.id.to_string();
             table.insert(id.as_str(), bytes.as_slice())?;
         }
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(())
     }
 
@@ -50,15 +44,10 @@ impl RunStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn get(&self, id: &RunId) -> Result<Option<ProbeRun>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-            .open_table(TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let read_txn = self.db.begin_read()?;
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(TABLE)?;
         let id_str = id.to_string();
         match table.get(id_str.as_str())? {
             Some(guard) => {
@@ -73,15 +62,10 @@ impl RunStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn list_for_probe(&self, probe_id: &ProbeId, limit: usize) -> Result<Vec<ProbeRun>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-            .open_table(TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let read_txn = self.db.begin_read()?;
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(TABLE)?;
         let mut runs = Vec::new();
         for entry in table.iter()? {
             let (_, v) = entry?;
@@ -100,18 +84,13 @@ impl RunStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn delete_for_probe(&self, probe_id: &ProbeId) -> Result<usize> {
         // Collect IDs in a read transaction first to avoid holding a write lock
         // while iterating.
         let ids_to_delete: Vec<String> = {
-            let read_txn = self
-                .db
-                .begin_read()
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-            let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let read_txn = self.db.begin_read()?;
+            let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(TABLE)?;
             let mut ids = Vec::new();
             for entry in table.iter()? {
                 let (k, v) = entry?;
@@ -128,21 +107,14 @@ impl RunStore {
             return Ok(0);
         }
 
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(TABLE)?;
             for id in &ids_to_delete {
                 table.remove(id.as_str())?;
             }
         }
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(count)
     }
 }

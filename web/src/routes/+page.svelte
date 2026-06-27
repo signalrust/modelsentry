@@ -4,6 +4,8 @@
   import type { Probe, ProbeRun, BaselineSnapshot, AlertEvent } from '$lib/types.js';
   import SummaryCard from '$lib/components/SummaryCard.svelte';
   import DriftChart from '$lib/components/DriftChart.svelte';
+  import LoadingState from '$lib/components/LoadingState.svelte';
+  import ErrorState from '$lib/components/ErrorState.svelte';
 
   // ---------------------------------------------------------------------------
   // State
@@ -24,25 +26,31 @@
 
   let activeAlerts = $derived(events.filter((e) => !e.acknowledged).length);
 
-  let lastRunStatus = $derived.by(() => {
+  // Format a p-value with enough precision that a tiny value isn't shown as 0.
+  function fmtP(p: number | undefined | null): string {
+    if (p === undefined || p === null) return '—';
+    if (p === 0) return '0';
+    if (p < 0.0001) return p.toExponential(2);
+    return p.toFixed(4);
+  }
+
+  // The single most recent run across all probes (computed once, reused below).
+  let latestRun = $derived.by(() => {
     const allRuns = Object.values(runsMap).flat();
-    if (allRuns.length === 0) return 'neutral' as const;
-    const latest = allRuns.reduce((a, b) =>
+    if (allRuns.length === 0) return null;
+    return allRuns.reduce((a, b) =>
       new Date(a.started_at) > new Date(b.started_at) ? a : b,
     );
-    if (latest.status === 'success') return 'ok' as const;
-    if (latest.status === 'partial_failure') return 'warn' as const;
+  });
+
+  let lastRunStatus = $derived.by(() => {
+    if (!latestRun) return 'neutral' as const;
+    if (latestRun.status === 'success') return 'ok' as const;
+    if (latestRun.status === 'partial_failure') return 'warn' as const;
     return 'error' as const;
   });
 
-  let lastRunLabel = $derived.by(() => {
-    const allRuns = Object.values(runsMap).flat();
-    if (allRuns.length === 0) return '—';
-    const latest = allRuns.reduce((a, b) =>
-      new Date(a.started_at) > new Date(b.started_at) ? a : b,
-    );
-    return latest.status.replace('_', ' ');
-  });
+  let lastRunLabel = $derived(latestRun ? latestRun.status.replace('_', ' ') : '—');
 
   let highDriftProbes = $derived(probes.filter((p) => {
     const runs = runsMap[p.id] ?? [];
@@ -60,7 +68,9 @@
   // Data loading — all fetches in parallel
   // ---------------------------------------------------------------------------
 
-  onMount(async () => {
+  async function load() {
+    loading = true;
+    error = null;
     try {
       const [fetchedProbes, fetchedEvents] = await Promise.all([
         api.probes.list(),
@@ -88,7 +98,9 @@
     } finally {
       loading = false;
     }
-  });
+  }
+
+  onMount(load);
 </script>
 
 <svelte:head>
@@ -106,9 +118,9 @@
 </div>
 
 {#if loading}
-  <p class="loading-state">Loading…</p>
+  <LoadingState message="Loading dashboard…" />
 {:else if error}
-  <div class="error-banner">Failed to load dashboard: {error}</div>
+  <ErrorState message="Failed to load dashboard: {error}" onretry={load} />
 {:else}
   <!-- KPI row -->
   <div class="grid grid-4 section">
@@ -154,7 +166,7 @@
               <tr>
                 <th>Time</th>
                 <th>Drift Level</th>
-                <th>KL Divergence</th>
+                <th>Combined p</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -167,7 +179,7 @@
                       {event.drift_report.drift_level}
                     </span>
                   </td>
-                  <td class="td-num">{event.drift_report.kl_divergence.toFixed(3)}</td>
+                  <td class="td-num">{fmtP(event.drift_report.combined_p_value)}</td>
                   <td>
                     {#if event.acknowledged}
                       <span class="badge badge-success">ack'd</span>

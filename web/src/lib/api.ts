@@ -5,6 +5,8 @@
  * Non-2xx responses throw an `ApiError` with the error message from the server.
  */
 import { z } from 'zod';
+import { auth } from './auth.svelte.js';
+import { PROVIDER_KIND } from './constants.js';
 import type {
   AlertEvent,
   AlertRule,
@@ -23,7 +25,11 @@ import type {
 const BASE_URL: string =
   import.meta.env.VITE_API_URL ?? 'http://localhost:7740/api';
 
-/** Optional API key for authenticated endpoints. Set via VITE_API_KEY. */
+/**
+ * Optional build-time API key for authenticated endpoints (local dev only).
+ * At runtime the key entered in the dashboard ({@link auth.key}) takes
+ * precedence so the pre-built static bundle can authenticate without a rebuild.
+ */
 const API_KEY: string | undefined = import.meta.env.VITE_API_KEY;
 
 // ---------------------------------------------------------------------------
@@ -44,11 +50,15 @@ export class ApiError extends Error {
 // Zod schemas — mirror web/src/lib/types.ts shapes
 // ---------------------------------------------------------------------------
 
-const providerKindSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('open_ai') }),
-  z.object({ kind: z.literal('anthropic') }),
-  z.object({ kind: z.literal('ollama'), base_url: z.string() }),
-  z.object({ kind: z.literal('azure_open_ai'), endpoint: z.string(), deployment: z.string() }),
+const providerSpecSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal(PROVIDER_KIND.OPEN_AI), model: z.string() }),
+  z.object({ kind: z.literal(PROVIDER_KIND.ANTHROPIC), model: z.string() }),
+  z.object({ kind: z.literal(PROVIDER_KIND.OLLAMA), model: z.string(), base_url: z.string() }),
+  z.object({
+    kind: z.literal(PROVIDER_KIND.AZURE),
+    chat_deployment: z.string(),
+    embedding_deployment: z.string().nullish(),
+  }),
 ]);
 
 const probeScheduleSchema = z.discriminatedUnion('kind', [
@@ -72,8 +82,7 @@ const probePromptSchema = z.object({
 const probeSchema = z.object({
   id: z.string(),
   name: z.string(),
-  provider: providerKindSchema,
-  model: z.string(),
+  provider: providerSpecSchema,
   prompts: z.array(probePromptSchema),
   schedule: probeScheduleSchema,
   created_at: z.string(),
@@ -82,13 +91,27 @@ const probeSchema = z.object({
 
 const driftLevelSchema = z.enum(['none', 'low', 'medium', 'high', 'critical']);
 
+const promptDriftSchema = z.object({
+  prompt_index: z.number(),
+  p_value: z.number(),
+  n_baseline: z.number(),
+});
+
 const driftReportSchema = z.object({
   run_id: z.string(),
   baseline_id: z.string(),
-  kl_divergence: z.number(),
-  cosine_distance: z.number(),
-  output_entropy_delta: z.number(),
+  // Calibrated combined p-value (lower ⇒ stronger drift) and its −log₁₀ score.
+  combined_p_value: z.number(),
+  statistic: z.number(),
+  // The target false-positive rate the verdict was judged against.
+  target_fpr: z.number(),
+  // Which test ran: 'per_prompt_conformal' or 'pooled_two_sample'.
+  method: z.string(),
+  // Per-prompt p-value breakdown (empty in pooled mode).
+  per_prompt: z.array(promptDriftSchema).default([]),
   drift_level: driftLevelSchema,
+  // Human-readable interpretation of the statistical verdict.
+  interpretation: z.string().default(''),
   computed_at: z.string(),
 });
 
@@ -107,17 +130,17 @@ const baselineSnapshotSchema = z.object({
   id: z.string(),
   probe_id: z.string(),
   captured_at: z.string(),
-  embedding_centroid: z.array(z.number()),
-  embedding_variance: z.number(),
-  output_tokens: z.array(z.array(z.string())),
+  schema_version: z.number().default(0),
+  embedding_model: z.string().default(''),
+  prompt_clouds: z.array(z.array(z.array(z.number()))).default([]),
+  n_runs: z.number().default(0),
   run_id: z.string(),
 });
 
 const alertRuleSchema = z.object({
   id: z.string(),
   probe_id: z.string(),
-  kl_threshold: z.number(),
-  cosine_threshold: z.number(),
+  target_fpr: z.number(),
   channels: z.array(alertChannelSchema),
   active: z.boolean(),
 });
@@ -145,8 +168,9 @@ async function request<T>(
       Object.entries(init?.headers ?? {}).filter(([, v]) => v != null),
     ),
   };
-  if (API_KEY) {
-    headers['Authorization'] = `Bearer ${API_KEY}`;
+  const activeKey = auth.key ?? API_KEY;
+  if (activeKey) {
+    headers['Authorization'] = `Bearer ${activeKey}`;
   }
 
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -155,6 +179,10 @@ async function request<T>(
   });
 
   if (!res.ok) {
+    if (res.status === 401) {
+      // Surface to the auth store so the dashboard can prompt for a valid key.
+      auth.markUnauthorized();
+    }
     let message = res.statusText;
     try {
       const body = (await res.json()) as { error?: string };

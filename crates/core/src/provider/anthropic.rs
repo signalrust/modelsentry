@@ -16,14 +16,10 @@ use modelsentry_common::{
     types::ApiKey,
 };
 
+use modelsentry_common::constants::defaults;
+
 use super::LlmProvider;
 use crate::drift::Embedding;
-
-const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_MAX_TOKENS: u32 = 1024;
-/// Per-request HTTP timeout for the chat endpoint.
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 // ── Public type ───────────────────────────────────────────────────────────────
 
@@ -56,7 +52,9 @@ impl AnthropicProvider {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(
+                defaults::anthropic::TIMEOUT_SECS,
+            ))
             .build()
             .map_err(|e| ModelSentryError::Provider {
                 message: format!("failed to build HTTP client: {e}"),
@@ -66,8 +64,8 @@ impl AnthropicProvider {
             api_key,
             client,
             model,
-            base_url: DEFAULT_BASE_URL.to_string(),
-            max_tokens: DEFAULT_MAX_TOKENS,
+            base_url: defaults::anthropic::BASE_URL.to_string(),
+            max_tokens: defaults::MAX_TOKENS,
         })
     }
 
@@ -157,9 +155,12 @@ impl LlmProvider for AnthropicProvider {
         let response = self
             .client
             .post(&url)
-            .header("x-api-key", self.api_key.expose())
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
+            .header(defaults::anthropic::API_KEY_HEADER, self.api_key.expose())
+            .header(
+                defaults::anthropic::VERSION_HEADER,
+                defaults::anthropic::API_VERSION,
+            )
+            // `.json()` sets `content-type: application/json`.
             .json(&request_body)
             .send()
             .await
@@ -200,7 +201,7 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn provider_name(&self) -> &'static str {
-        "anthropic"
+        modelsentry_common::constants::provider::ANTHROPIC
     }
 
     fn embedding_dim(&self) -> usize {
@@ -218,7 +219,7 @@ mod tests {
     use super::*;
 
     fn make_provider(base_url: &str) -> AnthropicProvider {
-        AnthropicProvider::new(ApiKey::new("test-key".into()), "claude-sonnet-4-6")
+        AnthropicProvider::new(ApiKey::new("test-key".into()), defaults::anthropic::MODEL)
             .expect("valid provider config")
             .with_base_url(base_url.to_string())
     }
@@ -333,7 +334,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        AnthropicProvider::new(ApiKey::new("test-key".into()), "claude-sonnet-4-6")
+        AnthropicProvider::new(ApiKey::new("test-key".into()), defaults::anthropic::MODEL)
             .expect("valid provider config")
             .with_base_url(server.uri())
             .with_max_tokens(7)

@@ -5,12 +5,13 @@ use std::sync::Arc;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use modelsentry_common::{
-    error::{ModelSentryError, Result},
+    error::Result,
     models::BaselineSnapshot,
     types::{BaselineId, ProbeId},
 };
 
-const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("baselines");
+const TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(modelsentry_common::constants::table::BASELINES);
 
 /// Typed CRUD for [`BaselineSnapshot`] records.
 pub struct BaselineStore {
@@ -26,23 +27,16 @@ impl BaselineStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] or [`ModelSentryError::Serialization`].
+    /// Returns a database error or a serialization error.
     pub fn insert(&self, baseline: &BaselineSnapshot) -> Result<()> {
         let bytes = serde_json::to_vec(baseline)?;
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(TABLE)?;
             let id = baseline.id.to_string();
             table.insert(id.as_str(), bytes.as_slice())?;
         }
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(())
     }
 
@@ -50,7 +44,7 @@ impl BaselineStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn get_latest_for_probe(&self, probe_id: &ProbeId) -> Result<Option<BaselineSnapshot>> {
         let all = self.list_for_probe(probe_id)?;
         Ok(all.into_iter().max_by_key(|b| b.captured_at))
@@ -60,15 +54,10 @@ impl BaselineStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn list_for_probe(&self, probe_id: &ProbeId) -> Result<Vec<BaselineSnapshot>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-            .open_table(TABLE)
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let read_txn = self.db.begin_read()?;
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(TABLE)?;
         let mut baselines = Vec::new();
         for entry in table.iter()? {
             let (_, v) = entry?;
@@ -84,22 +73,15 @@ impl BaselineStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction/commit errors.
+    /// Returns a database error on transaction/commit errors.
     pub fn delete(&self, id: &BaselineId) -> Result<bool> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         let existed = {
-            let mut table = write_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(TABLE)?;
             let id_str = id.to_string();
             table.remove(id_str.as_str())?.is_some()
         };
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(existed)
     }
 
@@ -109,16 +91,11 @@ impl BaselineStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelSentryError::Db`] on transaction errors.
+    /// Returns a database error on transaction errors.
     pub fn delete_for_probe(&self, probe_id: &ProbeId) -> Result<usize> {
         let ids_to_delete: Vec<String> = {
-            let read_txn = self
-                .db
-                .begin_read()
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
-            let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let read_txn = self.db.begin_read()?;
+            let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(TABLE)?;
             let mut ids = Vec::new();
             for entry in table.iter()? {
                 let (k, v) = entry?;
@@ -135,21 +112,14 @@ impl BaselineStore {
             return Ok(0);
         }
 
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn
-                .open_table(TABLE)
-                .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+            let mut table = write_txn.open_table(TABLE)?;
             for id in &ids_to_delete {
                 table.remove(id.as_str())?;
             }
         }
-        write_txn
-            .commit()
-            .map_err(|e| ModelSentryError::Db(e.to_string()))?;
+        write_txn.commit()?;
         Ok(count)
     }
 }
@@ -179,9 +149,10 @@ mod tests {
             id: BaselineId::new(),
             probe_id: probe_id.clone(),
             captured_at: Utc::now() + Duration::seconds(offset_secs),
-            embedding_centroid: vec![1.0, 2.0],
-            embedding_variance: 0.1,
-            output_tokens: vec![vec!["hello".into()]],
+            schema_version: modelsentry_common::models::BASELINE_SCHEMA_VERSION,
+            embedding_model: "test".into(),
+            prompt_clouds: vec![vec![vec![1.0, 2.0], vec![1.1, 1.9]]],
+            n_runs: 1,
             run_id: RunId::new(),
         }
     }

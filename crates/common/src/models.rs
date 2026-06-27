@@ -2,15 +2,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::constants::provider;
 use crate::types::{AlertRuleId, BaselineId, ProbeId, RunId};
 
-/// A configured probe — a named set of prompts sent to one provider/model
+/// A configured probe — a named set of prompts sent to one provider/model.
+///
+/// The full provider target (kind + model/deployment + any instance params)
+/// lives in [`ProviderSpec`]; the runtime constructs exactly that provider, so
+/// there is no separate, silently-ignored `model` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Probe {
     pub id: ProbeId,
     pub name: String,
-    pub provider: ProviderKind,
-    pub model: String,
+    pub provider: ProviderSpec,
     pub prompts: Vec<ProbePrompt>,
     pub schedule: ProbeSchedule,
     pub created_at: DateTime<Utc>,
@@ -25,18 +29,63 @@ pub struct ProbePrompt {
     pub expected_not_contains: Option<String>,
 }
 
+/// A complete, self-describing provider target for a probe.
+///
+/// Every variant carries the values the *user* chooses (the model/deployment,
+/// and any instance address such as the Ollama base URL). Deployment-wide
+/// infrastructure (base URLs, api-version, embedding model/dim, the Azure
+/// resource endpoint) comes from `config.providers.*`; the secret API key comes
+/// from the vault, keyed by [`ProviderSpec::provider_id`]. The runtime resolves
+/// a provider deterministically from this spec — no field is ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ProviderKind {
-    OpenAi,
-    Anthropic,
+pub enum ProviderSpec {
+    OpenAi {
+        model: String,
+    },
+    Anthropic {
+        model: String,
+    },
     Ollama {
+        model: String,
         base_url: String,
     },
-    AzureOpenAi {
-        endpoint: String,
-        deployment: String,
+    Azure {
+        /// Azure deployment name for the chat model (acts as the "model").
+        chat_deployment: String,
+        /// Optional per-probe embedding deployment. Falls back to
+        /// `config.providers.azure.embedding_deployment`; when neither is set,
+        /// the probe runs completions-only (no drift detection).
+        #[serde(default)]
+        embedding_deployment: Option<String>,
     },
+}
+
+impl ProviderSpec {
+    /// Provider-type identifier — the vault key for this provider's secret and
+    /// its human-readable name. Single-sourced from [`provider`].
+    #[must_use]
+    pub fn provider_id(&self) -> &'static str {
+        match self {
+            ProviderSpec::OpenAi { .. } => provider::OPENAI,
+            ProviderSpec::Anthropic { .. } => provider::ANTHROPIC,
+            ProviderSpec::Ollama { .. } => provider::OLLAMA,
+            ProviderSpec::Azure { .. } => provider::AZURE,
+        }
+    }
+
+    /// The user-facing model / deployment name for display.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        match self {
+            ProviderSpec::OpenAi { model }
+            | ProviderSpec::Anthropic { model }
+            | ProviderSpec::Ollama { model, .. } => model,
+            ProviderSpec::Azure {
+                chat_deployment, ..
+            } => chat_deployment,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,16 +95,61 @@ pub enum ProbeSchedule {
     EveryMinutes { minutes: u32 },
 }
 
-/// A frozen statistical snapshot — the reference point for drift detection
+/// Current baseline schema version. v2 stores per-prompt **output-embedding
+/// clouds** (one cloud per prompt, aggregated over one or more baseline runs)
+/// for the conformal two-sample drift test. v1 baselines (prompt-embedding
+/// centroid) are incompatible and must be re-captured.
+pub const BASELINE_SCHEMA_VERSION: u32 = 2;
+
+/// A frozen statistical snapshot — the reference point for drift detection.
+///
+/// For each prompt, stores a *cloud* of output (completion) embeddings sampled
+/// over one or more baseline runs. The drift test compares each new run's output
+/// for a prompt against that prompt's cloud.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaselineSnapshot {
     pub id: BaselineId,
     pub probe_id: ProbeId,
     pub captured_at: DateTime<Utc>,
-    pub embedding_centroid: Vec<f32>,
-    pub embedding_variance: f32,
-    pub output_tokens: Vec<Vec<String>>,
+    /// Schema version (see [`BASELINE_SCHEMA_VERSION`]). Defaulted to 0 for
+    /// legacy records so they can be detected and rejected.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Embedding model that produced the clouds (for migration & display).
+    #[serde(default)]
+    pub embedding_model: String,
+    /// Per-prompt output-embedding clouds: `prompt_clouds[i]` is prompt `i`'s
+    /// set of completion embeddings; each inner vector is one sample.
+    #[serde(default)]
+    pub prompt_clouds: Vec<Vec<Vec<f32>>>,
+    /// Number of runs aggregated into this baseline (cloud depth driver).
+    #[serde(default)]
+    pub n_runs: usize,
+    /// The most recent run folded into this baseline.
     pub run_id: RunId,
+}
+
+impl BaselineSnapshot {
+    /// Embedding dimensionality of the stored clouds (0 if empty).
+    ///
+    /// Used to detect when a run was produced by a different embedding model
+    /// than the baseline (e.g. `text-embedding-3-small` → `-3-large`), so drift
+    /// comparison fails with actionable guidance rather than an opaque error.
+    #[must_use]
+    pub fn embedding_dim(&self) -> usize {
+        self.prompt_clouds
+            .iter()
+            .flatten()
+            .find(|v| !v.is_empty())
+            .map_or(0, Vec::len)
+    }
+
+    /// True if this baseline uses the current schema and carries usable clouds.
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        self.schema_version >= BASELINE_SCHEMA_VERSION
+            && self.prompt_clouds.iter().any(|c| !c.is_empty())
+    }
 }
 
 /// Results of a single probe run (one full pass of all prompts)
@@ -79,16 +173,40 @@ pub enum RunStatus {
     Failed,
 }
 
-/// Statistical comparison between a run and its baseline
+/// Calibrated statistical verdict comparing a run to its baseline.
+///
+/// Produced by a nonparametric two-sample test (per-prompt conformal, or pooled
+/// MMD/energy). The `combined_p_value` is calibrated to a false-positive rate:
+/// the run drifted (at the operator's `target_fpr`) when `combined_p_value <
+/// target_fpr`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriftReport {
     pub run_id: RunId,
     pub baseline_id: BaselineId,
-    pub kl_divergence: f32,
-    pub cosine_distance: f32,
-    pub output_entropy_delta: f32,
+    /// Calibrated combined p-value for the run (lower ⇒ stronger drift).
+    pub combined_p_value: f32,
+    /// Drift score `−log₁₀(combined_p_value)`; higher ⇒ stronger evidence.
+    pub statistic: f32,
+    /// Target false-positive rate this report was judged against.
+    pub target_fpr: f32,
+    /// Test that produced the verdict (`per_prompt_conformal` / `pooled_two_sample`).
+    pub method: String,
+    /// Per-prompt p-value breakdown (empty in pooled mode).
+    #[serde(default)]
+    pub per_prompt: Vec<PromptDrift>,
     pub drift_level: DriftLevel,
+    /// Human-readable interpretation of the statistical verdict.
+    #[serde(default)]
+    pub interpretation: String,
     pub computed_at: DateTime<Utc>,
+}
+
+/// Per-prompt entry in a [`DriftReport`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptDrift {
+    pub prompt_index: usize,
+    pub p_value: f32,
+    pub n_baseline: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -105,8 +223,9 @@ pub enum DriftLevel {
 pub struct AlertRule {
     pub id: AlertRuleId,
     pub probe_id: ProbeId,
-    pub kl_threshold: f32,
-    pub cosine_threshold: f32,
+    /// Fire when a run's calibrated `combined_p_value` is below this
+    /// false-positive rate (e.g. `0.01`). Lower ⇒ fewer, stronger alerts.
+    pub target_fpr: f32,
     pub channels: Vec<AlertChannel>,
     pub active: bool,
 }
@@ -137,8 +256,9 @@ mod tests {
         let probe = Probe {
             id: ProbeId::new(),
             name: "test-probe".to_string(),
-            provider: ProviderKind::OpenAi,
-            model: "gpt-4o".to_string(),
+            provider: ProviderSpec::OpenAi {
+                model: crate::constants::defaults::openai::MODEL.to_string(),
+            },
             prompts: vec![ProbePrompt {
                 id: Uuid::new_v4(),
                 text: "Hello?".to_string(),
@@ -175,13 +295,24 @@ mod tests {
     }
 
     #[test]
-    fn provider_kind_tagged_json_shape() {
-        let p = ProviderKind::Ollama {
-            base_url: "http://localhost:11434".to_string(),
+    fn provider_spec_tagged_json_shape() {
+        let p = ProviderSpec::Ollama {
+            model: crate::constants::defaults::ollama::MODEL.to_string(),
+            base_url: crate::constants::defaults::ollama::BASE_URL.to_string(),
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"kind\":\"ollama\""));
         assert!(json.contains("base_url"));
+    }
+
+    #[test]
+    fn provider_spec_accessors_report_id_and_model() {
+        let spec = ProviderSpec::Azure {
+            chat_deployment: "gpt-4o-prod".to_string(),
+            embedding_deployment: None,
+        };
+        assert_eq!(spec.provider_id(), crate::constants::provider::AZURE);
+        assert_eq!(spec.model(), "gpt-4o-prod");
     }
 
     #[test]
@@ -190,15 +321,17 @@ mod tests {
             id: BaselineId::new(),
             probe_id: ProbeId::new(),
             captured_at: Utc::now(),
-            embedding_centroid: vec![0.1, 0.2, 0.3],
-            embedding_variance: 0.05,
-            output_tokens: vec![vec!["hello".to_string(), "world".to_string()]],
+            schema_version: BASELINE_SCHEMA_VERSION,
+            embedding_model: "text-embedding-3-small".to_string(),
+            prompt_clouds: vec![vec![vec![0.1, 0.2, 0.3], vec![0.11, 0.19, 0.31]]],
+            n_runs: 2,
             run_id: RunId::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let snap2: BaselineSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(snap.embedding_centroid, snap2.embedding_centroid);
-        assert_eq!(snap.output_tokens, snap2.output_tokens);
+        assert_eq!(snap.prompt_clouds, snap2.prompt_clouds);
+        assert_eq!(snap.embedding_dim(), 3);
+        assert!(snap.is_current());
     }
 
     #[test]
@@ -232,8 +365,7 @@ mod tests {
         let rule = AlertRule {
             id: AlertRuleId::new(),
             probe_id: ProbeId::new(),
-            kl_threshold: 0.05,
-            cosine_threshold: 0.1,
+            target_fpr: 0.01,
             channels: vec![AlertChannel::Webhook {
                 url: "https://example.com/hook".to_string(),
             }],
@@ -253,10 +385,13 @@ mod tests {
             drift_report: DriftReport {
                 run_id: RunId::new(),
                 baseline_id: BaselineId::new(),
-                kl_divergence: 0.3,
-                cosine_distance: 0.2,
-                output_entropy_delta: 0.1,
+                combined_p_value: 0.002,
+                statistic: 2.7,
+                target_fpr: 0.01,
+                method: crate::constants::method::PER_PROMPT_CONFORMAL.to_string(),
+                per_prompt: Vec::new(),
                 drift_level: DriftLevel::High,
+                interpretation: String::new(),
                 computed_at: Utc::now(),
             },
             fired_at: Utc::now(),

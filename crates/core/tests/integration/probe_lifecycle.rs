@@ -8,14 +8,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use modelsentry_common::{
+    constants::defaults,
     error::Result as CoreResult,
     models::{
-        BaselineSnapshot, DriftLevel, Probe, ProbePrompt, ProbeSchedule, ProviderKind, RunStatus,
+        BaselineSnapshot, DriftLevel, Probe, ProbePrompt, ProbeSchedule, ProviderSpec, RunStatus,
     },
     types::{BaselineId, ProbeId, RunId},
 };
 use modelsentry_core::{
-    drift::{Embedding, calculator::DriftCalculator},
+    drift::{Embedding, assessment::AssessmentConfig, calculator::DriftCalculator},
     probe_runner::ProbeRunner,
     provider::LlmProvider,
 };
@@ -86,8 +87,9 @@ fn make_probe() -> Probe {
     Probe {
         id: ProbeId::new(),
         name: "test-probe".into(),
-        provider: ProviderKind::OpenAi,
-        model: "gpt-4o".into(),
+        provider: ProviderSpec::OpenAi {
+            model: defaults::openai::MODEL.into(),
+        },
         prompts: vec![
             ProbePrompt {
                 id: uuid::Uuid::new_v4(),
@@ -108,35 +110,36 @@ fn make_probe() -> Probe {
     }
 }
 
-/// Build a `BaselineSnapshot` from a `ProbeRun` produced by `ProbeRunner::run`.
-fn baseline_from_run(run: &modelsentry_common::models::ProbeRun) -> BaselineSnapshot {
-    let embeddings: Vec<Embedding> = run
-        .embeddings
-        .iter()
-        .filter(|v| !v.is_empty())
-        .map(|v| Embedding::new(v.clone()).unwrap())
-        .collect();
-    let centroid = Embedding::centroid(&embeddings).unwrap();
-    let norms: Vec<f32> = embeddings.iter().map(Embedding::l2_norm).collect();
-    #[allow(clippy::cast_precision_loss)]
-    let variance = {
-        let n = norms.len() as f32;
-        let mean = norms.iter().sum::<f32>() / n;
-        norms.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / n
-    };
-    let output_tokens: Vec<Vec<String>> = run
-        .completions
-        .iter()
-        .map(|c| c.split_whitespace().map(String::from).collect())
+/// Build a rich baseline: for each of `n_prompts` prompts, a cloud of `k`
+/// jittered samples around `center`. (Real capture aggregates this many *runs*;
+/// here we synthesize the cloud so the calibrated test has statistical power.)
+fn jittered_baseline(
+    probe_id: ProbeId,
+    run_id: RunId,
+    center: &[f32],
+    n_prompts: usize,
+    k: usize,
+) -> BaselineSnapshot {
+    let prompt_clouds: Vec<Vec<Vec<f32>>> = (0..n_prompts)
+        .map(|_| {
+            (0..k)
+                .map(|i| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let jitter = (i as f32 - k as f32 / 2.0) * 0.001;
+                    center.iter().map(|c| c + jitter).collect()
+                })
+                .collect()
+        })
         .collect();
     BaselineSnapshot {
         id: BaselineId::new(),
-        probe_id: run.probe_id.clone(),
+        probe_id,
         captured_at: Utc::now(),
-        embedding_centroid: centroid.as_slice().to_vec(),
-        embedding_variance: variance,
-        output_tokens,
-        run_id: run.id.clone(),
+        schema_version: modelsentry_common::models::BASELINE_SCHEMA_VERSION,
+        embedding_model: "stub".to_string(),
+        prompt_clouds,
+        n_runs: k,
+        run_id,
     }
 }
 
@@ -159,10 +162,16 @@ async fn full_lifecycle_create_probe_capture_baseline_detect_drift() {
     assert_eq!(baseline_run.status, RunStatus::Success);
     store.runs().insert(&baseline_run).unwrap();
 
-    let baseline = baseline_from_run(&baseline_run);
+    let baseline = jittered_baseline(
+        probe.id.clone(),
+        baseline_run.id.clone(),
+        &[1.0_f32, 0.0, 0.0],
+        probe.prompts.len(),
+        60,
+    );
     store.baselines().insert(&baseline).unwrap();
 
-    // --- second run (shifted embeddings — simulate drift) ---
+    // --- second run (shifted output embeddings — simulate drift) ---
     let drift_runner = ProbeRunner::new(Arc::new(StubProvider::new(
         vec![0.0_f32, 1.0, 0.0], // orthogonal to baseline
         "The quick brown fox jumped over many hurdles today.",
@@ -172,17 +181,21 @@ async fn full_lifecycle_create_probe_capture_baseline_detect_drift() {
     store.runs().insert(&drift_run).unwrap();
 
     // --- compute drift ---
-    let calc = DriftCalculator::new(0.1, 0.15).unwrap();
+    let calc = DriftCalculator::new(AssessmentConfig {
+        target_fpr: 0.05,
+        ..AssessmentConfig::default()
+    });
     let report = calc.compute(&drift_run, &baseline).unwrap();
 
     assert!(
-        report.cosine_distance > 0.0,
-        "orthogonal embeddings must produce non-zero cosine distance"
+        report.combined_p_value < 0.05,
+        "orthogonal output shift should be significant, p={}",
+        report.combined_p_value
     );
     assert_ne!(
         report.drift_level,
         DriftLevel::None,
-        "drift should be detected after embedding shift"
+        "drift should be detected after output shift"
     );
 
     // Confirm persisted runs and baseline are retrievable
@@ -240,9 +253,10 @@ async fn delete_probe_also_deletes_associated_runs_and_baselines() {
         id: BaselineId::new(),
         probe_id: probe_id.clone(),
         captured_at: Utc::now(),
-        embedding_centroid: vec![1.0, 0.0, 0.0],
-        embedding_variance: 0.0,
-        output_tokens: vec![vec!["hello".into()]],
+        schema_version: modelsentry_common::models::BASELINE_SCHEMA_VERSION,
+        embedding_model: "stub".into(),
+        prompt_clouds: vec![vec![vec![1.0, 0.0, 0.0]]],
+        n_runs: 1,
         run_id: RunId::new(),
     };
     store.baselines().insert(&baseline).unwrap();

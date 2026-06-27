@@ -1,6 +1,7 @@
 <script lang="ts">
-  import type { Probe, ProbeRun, DriftLevel } from '$lib/types.js';
-  import { api } from '$lib/api.js';
+  import { providerModel, type Probe, type ProbeRun, type DriftLevel } from '$lib/types.js';
+  import { api, ApiError } from '$lib/api.js';
+  import { DRIFT_ORDER, PROVIDER_LABELS, type ProviderKindTag } from '$lib/constants.js';
 
   let { probes, latestRunMap = {}, onRunUpdated }: {
     probes: Probe[];
@@ -16,10 +17,7 @@
   let sortKey: SortKey = $state('name');
   let sortAsc = $state(true);
   let runningId: string | null = $state(null);
-
-  const DRIFT_ORDER: Record<DriftLevel, number> = {
-    none: 0, low: 1, medium: 2, high: 3, critical: 4,
-  };
+  let runError: string | null = $state(null);
 
   function driftOf(probeId: string): DriftLevel {
     return latestRunMap[probeId]?.drift_report?.drift_level ?? 'none';
@@ -42,19 +40,27 @@
   }
 
   function providerLabel(probe: Probe): string {
-    return probe.provider.kind.replace('_', ' ');
+    return PROVIDER_LABELS[probe.provider.kind as ProviderKindTag] ?? probe.provider.kind.replaceAll('_', ' ');
   }
 
   async function runNow(probe: Probe) {
     if (runningId) return;
     runningId = probe.id;
+    runError = null;
     try {
       const result = await api.probes.runNow(probe.id);
       onRunUpdated?.(probe.id, result);
-    } catch {}
-    finally { runningId = null; }
+    } catch (e) {
+      runError = `Run failed for "${probe.name}": ${e instanceof ApiError ? e.message : String(e)}`;
+    } finally {
+      runningId = null;
+    }
   }
 </script>
+
+{#if runError}
+  <div class="error-banner table-run-error" role="alert">{runError}</div>
+{/if}
 
 {#if probes.length === 0}
   <p class="empty-state">No probes configured yet.</p>
@@ -87,7 +93,7 @@
             <td class="td-name">
               <a href="/probes/{probe.id}">{probe.name}</a>
             </td>
-            <td class="td-meta">{providerLabel(probe)} / {probe.model}</td>
+            <td class="td-meta">{providerLabel(probe)} / {providerModel(probe.provider)}</td>
             <td class="td-meta">{scheduleLabel(probe)}</td>
             <td>
               <span class="badge" data-level={level}>{level}</span>
@@ -128,5 +134,8 @@
   .td-never {
     color: var(--text-muted);
     font-style: italic;
+  }
+  .table-run-error {
+    margin-bottom: var(--sp-3);
   }
 </style>

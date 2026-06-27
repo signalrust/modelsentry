@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Response, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::{BoxError, Json, Router, routing::get};
-use include_dir::{Dir, include_dir};
 use modelsentry_common::{
     config::AppConfig,
+    constants::header as app_header,
     error::{ModelSentryError, Result},
 };
 use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
@@ -18,72 +18,22 @@ use modelsentry_store::AppStore;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 
-use crate::{routes, scheduler::ProviderRegistry, vault::Vault};
-
-/// Maximum accepted request body. Probe/alert payloads are small; anything
-/// larger is rejected with `413 Payload Too Large` to bound memory use.
-const MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
-
-/// Per-client rate limit (applied in `run()` keyed by peer IP): the bucket
-/// holds up to `RATE_LIMIT_BURST` requests and refills one token per second,
-/// so a steady stream is allowed but credential brute-forcing is throttled.
-const RATE_LIMIT_BURST: u32 = 100;
-const RATE_LIMIT_REPLENISH_SECS: u64 = 1;
+use crate::constants::server::{MAX_BODY_BYTES, RATE_LIMIT_BURST, RATE_LIMIT_REPLENISH_SECS};
+use crate::{routes, vault::Vault};
 
 /// `GET /health` — lightweight liveness probe for the daemon.
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok", "service": "modelsentry-daemon" }))
 }
 
-/// Compiled-in copy of the `SvelteKit` static build output.
-///
-/// In development, `web/build/` may be empty or absent; the handler returns
-/// 404s for asset requests which is fine because Vite's dev server handles them.
-///
-/// In a release build the CI workflow runs `npm run build` before `cargo build`
-/// so the directory is fully populated and embedded.
-static WEB_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../web/build");
-
 /// Shared application state injected into every route handler.
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<AppStore>,
     pub vault: Arc<Vault>,
-    pub providers: Arc<ProviderRegistry>,
     pub calculator: Arc<DriftCalculator>,
     pub alert_engine: Arc<AlertEngine>,
     pub config: Arc<AppConfig>,
-}
-
-/// Serve a file from the embedded `WEB_DIR`, falling back to `index.html`
-/// for unrecognised paths (`SvelteKit` client-side routing).
-async fn serve_static(Path(path): Path<String>) -> Response<Body> {
-    // Strip leading slash if present
-    let rel = path.trim_start_matches('/');
-    serve_file(rel)
-}
-
-async fn serve_index() -> Response<Body> {
-    serve_file("index.html")
-}
-
-fn serve_file(rel: &str) -> Response<Body> {
-    let file = WEB_DIR
-        .get_file(rel)
-        .or_else(|| WEB_DIR.get_file("index.html"));
-    if let Some(f) = file {
-        let mime = mime_guess::from_path(f.path())
-            .first_raw()
-            .unwrap_or("application/octet-stream");
-        let mut resp = Response::new(Body::from(f.contents()));
-        resp.headers_mut()
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
-        resp
-    } else {
-        let mut resp = Response::new(Body::from("Not Found"));
-        *resp.status_mut() = StatusCode::NOT_FOUND;
-        resp
-    }
 }
 
 /// Build the Axum router with all routes and middleware.
@@ -121,12 +71,11 @@ pub fn build_router(state: AppState) -> Router {
         CorsLayer::new()
     };
 
+    // API-only server: the dashboard is served separately (the Node container in
+    // docker-compose). Non-`/api`, non-`/health` paths return 404.
     Router::new()
         .nest("/api", api)
         .route("/health", get(health))
-        // Serve the embedded SvelteKit dashboard for all non-API requests
-        .route("/", get(serve_index))
-        .route("/{*path}", get(serve_static))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -160,7 +109,7 @@ async fn auth_middleware(
     // Fall back to X-Api-Key header
     let token = token.or_else(|| {
         headers
-            .get("x-api-key")
+            .get(app_header::API_KEY)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
     });
@@ -245,11 +194,13 @@ mod tests {
         AlertsConfig, AuthConfig, DatabaseConfig, ProvidersConfig, SchedulerConfig, ServerConfig,
         VaultConfig,
     };
-    use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
+    use modelsentry_core::{
+        alert::AlertEngine,
+        drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
+    };
     use modelsentry_store::AppStore;
 
     use super::*;
-    use crate::scheduler::new_registry;
 
     fn open_store() -> (tempfile::TempDir, Arc<AppStore>) {
         let dir = tempfile::tempdir().unwrap();
@@ -274,11 +225,7 @@ mod tests {
             scheduler: SchedulerConfig {
                 default_interval_minutes: 60,
             },
-            alerts: AlertsConfig {
-                drift_threshold_kl: 0.5,
-                drift_threshold_cos: 0.5,
-                allow_private_webhook_targets: false,
-            },
+            alerts: AlertsConfig::default(),
             providers: ProvidersConfig::default(),
             auth: AuthConfig {
                 enabled: auth_enabled,
@@ -300,8 +247,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            providers: Arc::new(new_registry()),
-            calculator: Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
+            calculator: Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             alert_engine: Arc::new(AlertEngine::default()),
             config: Arc::new(config),
         };
@@ -364,7 +310,7 @@ mod tests {
         let resp = server
             .get("/api/probes")
             .add_header(
-                axum::http::HeaderName::from_static("x-api-key"),
+                axum::http::HeaderName::from_static(app_header::API_KEY),
                 "secret-key".parse::<axum::http::HeaderValue>().unwrap(),
             )
             .await;

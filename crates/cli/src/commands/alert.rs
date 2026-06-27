@@ -50,10 +50,10 @@ struct EventRow {
     id: String,
     #[tabled(rename = "Drift Level")]
     level: String,
-    #[tabled(rename = "KL Div.")]
-    kl: String,
-    #[tabled(rename = "Cosine")]
-    cosine: String,
+    #[tabled(rename = "Combined p")]
+    p_value: String,
+    #[tabled(rename = "Score")]
+    score: String,
     #[tabled(rename = "Fired At")]
     fired_at: String,
     #[tabled(rename = "Ack?")]
@@ -64,10 +64,8 @@ struct EventRow {
 struct RuleRow {
     #[tabled(rename = "ID")]
     id: String,
-    #[tabled(rename = "KL Thresh.")]
-    kl_threshold: String,
-    #[tabled(rename = "Cos. Thresh.")]
-    cosine_threshold: String,
+    #[tabled(rename = "Target FPR")]
+    target_fpr: String,
     #[tabled(rename = "Channels")]
     channels: String,
     #[tabled(rename = "Active")]
@@ -128,8 +126,8 @@ pub async fn handle(args: AlertArgs, api_url: &str) -> Result<()> {
                 .map(|e| EventRow {
                     id: short_id(&e.id.to_string()),
                     level: drift_label(&e.drift_report.drift_level).to_owned(),
-                    kl: format!("{:.4}", e.drift_report.kl_divergence),
-                    cosine: format!("{:.4}", e.drift_report.cosine_distance),
+                    p_value: format!("{:.4}", e.drift_report.combined_p_value),
+                    score: format!("{:.2}", e.drift_report.statistic),
                     fired_at: e.fired_at.to_rfc3339(),
                     acked: if e.acknowledged { "yes" } else { "no" },
                 })
@@ -163,8 +161,7 @@ pub async fn handle(args: AlertArgs, api_url: &str) -> Result<()> {
                         .join(", ");
                     RuleRow {
                         id: r.id.to_string(),
-                        kl_threshold: format!("{:.4}", r.kl_threshold),
-                        cosine_threshold: format!("{:.4}", r.cosine_threshold),
+                        target_fpr: format!("{:.4}", r.target_fpr),
                         channels,
                         active: if r.active { "yes" } else { "no" },
                     }

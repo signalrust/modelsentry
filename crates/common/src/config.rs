@@ -55,13 +55,46 @@ pub struct SchedulerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlertsConfig {
-    pub drift_threshold_kl: f32,
-    pub drift_threshold_cos: f32,
+    /// Target false-positive rate for drift alerts. A run alerts when its
+    /// calibrated combined p-value is below this (e.g. `0.01`). Must be in
+    /// `(0, 1)`. Lower ⇒ fewer, stronger alerts.
+    #[serde(default = "default_target_fpr")]
+    pub target_fpr: f32,
     /// Allow webhook/Slack alert targets that resolve to private, loopback, or
     /// link-local addresses. Defaults to `false` (SSRF-safe). Enable only for
     /// trusted internal receivers.
     #[serde(default)]
     pub allow_private_webhook_targets: bool,
+    /// Number of recent successful runs aggregated into a baseline capture. More
+    /// runs ⇒ richer per-prompt clouds ⇒ more statistical power. Defaults to 20.
+    #[serde(default = "default_baseline_capture_runs")]
+    pub baseline_capture_runs: usize,
+    /// Permutations for the pooled-fallback two-sample test. Defaults to 200.
+    #[serde(default = "default_permutations")]
+    pub permutations: usize,
+}
+
+fn default_target_fpr() -> f32 {
+    0.01
+}
+
+fn default_baseline_capture_runs() -> usize {
+    20
+}
+
+fn default_permutations() -> usize {
+    200
+}
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            target_fpr: default_target_fpr(),
+            allow_private_webhook_targets: false,
+            baseline_capture_runs: default_baseline_capture_runs(),
+            permutations: default_permutations(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -72,6 +105,8 @@ pub struct ProvidersConfig {
     pub anthropic: AnthropicConfig,
     #[serde(default)]
     pub ollama: OllamaConfig,
+    #[serde(default)]
+    pub azure: AzureConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,19 +136,19 @@ impl Default for OpenAiConfig {
 }
 
 fn default_openai_model() -> String {
-    "gpt-5.4".to_string()
+    crate::constants::defaults::openai::MODEL.to_string()
 }
 fn default_openai_embedding_model() -> String {
-    "text-embedding-3-small".to_string()
+    crate::constants::defaults::openai::EMBEDDING_MODEL.to_string()
 }
 fn default_openai_embedding_dim() -> usize {
-    1536
+    crate::constants::defaults::openai::EMBEDDING_DIM
 }
 fn default_openai_base_url() -> String {
-    "https://api.openai.com".to_string()
+    crate::constants::defaults::openai::BASE_URL.to_string()
 }
 fn default_max_tokens() -> u32 {
-    1024
+    crate::constants::defaults::MAX_TOKENS
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,13 +175,13 @@ impl Default for AnthropicConfig {
 }
 
 fn default_anthropic_model() -> String {
-    "claude-sonnet-4-6".to_string()
+    crate::constants::defaults::anthropic::MODEL.to_string()
 }
 fn default_anthropic_base_url() -> String {
-    "https://api.anthropic.com".to_string()
+    crate::constants::defaults::anthropic::BASE_URL.to_string()
 }
 fn default_anthropic_api_version() -> String {
-    "2023-06-01".to_string()
+    crate::constants::defaults::anthropic::API_VERSION.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -167,10 +202,52 @@ impl Default for OllamaConfig {
 }
 
 fn default_ollama_model() -> String {
-    "llama3".to_string()
+    crate::constants::defaults::ollama::MODEL.to_string()
 }
 fn default_ollama_base_url() -> String {
-    "http://localhost:11434".to_string()
+    crate::constants::defaults::ollama::BASE_URL.to_string()
+}
+
+/// Azure `OpenAI` infrastructure config. The resource `endpoint`, `api_version`,
+/// and embedding deployment live here (deployment-wide infra); the per-probe
+/// chat deployment is carried by the probe's `ProviderSpec`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AzureConfig {
+    /// Resource endpoint, e.g. `https://my-resource.openai.azure.com`. Empty by
+    /// default — provider construction fails with guidance until it is set.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Default embedding deployment name. When unset (and the probe spec also
+    /// omits one), Azure probes run completions-only with no drift detection.
+    #[serde(default)]
+    pub embedding_deployment: Option<String>,
+    /// Native output dimension of the embedding deployment.
+    #[serde(default = "default_azure_embedding_dim")]
+    pub embedding_dim: usize,
+    /// REST API `api-version` query parameter.
+    #[serde(default = "default_azure_api_version")]
+    pub api_version: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+}
+
+impl Default for AzureConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            embedding_deployment: None,
+            embedding_dim: default_azure_embedding_dim(),
+            api_version: default_azure_api_version(),
+            max_tokens: default_max_tokens(),
+        }
+    }
+}
+
+fn default_azure_embedding_dim() -> usize {
+    crate::constants::defaults::azure::EMBEDDING_DIM
+}
+fn default_azure_api_version() -> String {
+    crate::constants::defaults::azure::API_VERSION.to_string()
 }
 
 /// Optional API-key authentication for the daemon HTTP API.
@@ -213,14 +290,9 @@ impl AppConfig {
                 message: "server.port must not be 0".to_string(),
             });
         }
-        if self.alerts.drift_threshold_kl < 0.0 {
+        if !(self.alerts.target_fpr > 0.0 && self.alerts.target_fpr < 1.0) {
             return Err(ModelSentryError::Config {
-                message: "alerts.drift_threshold_kl must be non-negative".to_string(),
-            });
-        }
-        if self.alerts.drift_threshold_cos < 0.0 {
-            return Err(ModelSentryError::Config {
-                message: "alerts.drift_threshold_cos must be non-negative".to_string(),
+                message: "alerts.target_fpr must be in the open interval (0, 1)".to_string(),
             });
         }
         if self.auth.enabled && self.auth.api_keys.is_empty() {
@@ -299,11 +371,7 @@ mod tests {
             scheduler: SchedulerConfig {
                 default_interval_minutes: 60,
             },
-            alerts: AlertsConfig {
-                drift_threshold_kl: 0.1,
-                drift_threshold_cos: 0.1,
-                allow_private_webhook_targets: false,
-            },
+            alerts: AlertsConfig::default(),
             providers: ProvidersConfig::default(),
             auth: AuthConfig::default(),
         }
@@ -326,19 +394,20 @@ mod tests {
     }
 
     #[test]
-    fn config_validate_rejects_negative_threshold() {
+    fn config_validate_rejects_target_fpr_out_of_range() {
         let mut cfg = test_config();
-        cfg.alerts.drift_threshold_kl = -1.0;
+        cfg.alerts.target_fpr = 0.0;
+        assert!(cfg.validate().is_err());
+        cfg.alerts.target_fpr = 1.5;
         let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("kl"));
+        assert!(err.to_string().contains("target_fpr"));
     }
 
     #[test]
-    fn config_validate_rejects_negative_cos_threshold() {
+    fn config_validate_accepts_valid_target_fpr() {
         let mut cfg = test_config();
-        cfg.alerts.drift_threshold_cos = -0.5;
-        let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("cos"));
+        cfg.alerts.target_fpr = 0.01;
+        cfg.validate().expect("0.01 is a valid FPR");
     }
 
     #[test]

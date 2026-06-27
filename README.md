@@ -64,7 +64,7 @@ curl -X PUT http://127.0.0.1:7740/api/vault/keys/openai \
   -d '{"key": "sk-..."}'
 ```
 
-`provider` is the path segment (`openai`, `anthropic`, `ollama`). The body also accepts optional `model` and `base_url` overrides. For Ollama, `key` may be empty.
+The path segment is the **provider type** — `openai`, `anthropic`, or `azure` — and the body is just the secret: `{"key": "..."}`. The vault stores only the API key; model, base URL, api-version, and the Azure endpoint come from `[providers.*]` config, and the model/deployment is chosen per probe. Ollama needs no key (it has no auth), so it has no vault entry. A stored key takes effect on the next run — no restart.
 
 ### 3 — Start the daemon
 
@@ -79,10 +79,16 @@ Create a TOML file describing the probe:
 
 ```toml
 # my_probe.toml
-name         = "gpt-5-smoke"
-provider     = "open_ai"
-model        = "gpt-5.4"
-schedule     = { kind = "every_minutes", minutes = 60 }
+name     = "gpt-5-smoke"
+schedule = { kind = "every_minutes", minutes = 60 }
+
+# The provider spec fully declares the target. `kind` selects the provider and
+# carries the model the probe actually runs:
+#   { kind = "open_ai",   model = "gpt-5.4" }
+#   { kind = "anthropic", model = "claude-sonnet-4-6" }
+#   { kind = "ollama",    model = "llama3", base_url = "http://localhost:11434" }
+#   { kind = "azure",     chat_deployment = "gpt-4o-prod", embedding_deployment = "embed-prod" }
+provider = { kind = "open_ai", model = "gpt-5.4" }
 
 [[prompts]]
 text = "Summarise the theory of relativity in one sentence."
@@ -118,9 +124,9 @@ modelsentry probe status 018e1234-...
 ```
 Probe      gpt-5-smoke
 Status     ok
-Drift      None  (KL 0.003 / Cos 0.001)
+Drift      None  (combined p = 0.41, target FPR 0.01)
 Last run   2026-03-06 12:00 UTC (42 s)
-Baseline   2026-03-06 11:45 UTC
+Baseline   2026-03-06 11:45 UTC  (5 prompt clouds · 20 runs)
 ```
 
 ### 7 — Set up an alert
@@ -128,12 +134,12 @@ Baseline   2026-03-06 11:45 UTC
 ```bash
 modelsentry alert create \
   --probe 018e1234-... \
-  --kl-threshold 0.10 \
-  --cos-threshold 0.15 \
+  --target-fpr 0.01 \
   --webhook https://hooks.slack.com/services/...
 ```
 
-When drift exceeds either threshold the webhook fires with a JSON payload containing the full `DriftReport`.
+When a run's calibrated combined p-value falls below `target_fpr`, the webhook
+fires with a JSON payload containing the full `DriftReport`.
 
 ---
 
@@ -145,8 +151,8 @@ When drift exceeds either threshold the webhook fires with a JSON payload contai
 │  ┌──────────┐  run()  ┌──────────────┐  DriftReport         │
 │  │  Probe   │ ──────► │ ProbeRunner  │ ──────────────────►  │
 │  │ (config) │         │ (LLM calls)  │    DriftCalculator   │
-│  └──────────┘         └──────────────┘    (KL + cosine +    │
-│                                            entropy delta)    │
+│  └──────────┘         └──────────────┘    (conformal +      │
+│                                            MMD/energy)       │
 │                                               │              │
 │                                         AlertEngine         │
 │                                         (webhook / Slack)   │
@@ -156,33 +162,46 @@ When drift exceeds either threshold the webhook fires with a JSON payload contai
    SvelteKit Dashboard                   .modelsentry/store.redb
 ```
 
-Three drift metrics are computed on every run and compared against the captured baseline:
+Every run embeds the model's **completions** and compares the resulting
+per-prompt output-embedding clouds against the baseline with a **calibrated
+nonparametric two-sample test** (per-prompt conformal, with a pooled MMD/energy
+permutation fallback). The result is a single calibrated **combined p-value**: a
+run alerts when `combined_p_value < target_fpr`, so the threshold *is* your chosen
+false-positive rate. See
+[`docs/DRIFT_DETECTION_METHODOLOGY.md`](docs/DRIFT_DETECTION_METHODOLOGY.md).
 
-| Metric | What it measures |
-|--------|-----------------|
-| **KL divergence** (Gaussian) | Shift in the embedding distribution's mean and variance |
-| **Cosine distance** | Directional drift of the mean embedding from the baseline centroid |
-| **Entropy delta** | Change in output token distribution entropy (vocabulary breadth) |
-
-The `DriftLevel` is derived from the worst metric relative to configured thresholds:
+The `DriftLevel` is derived from how many orders of magnitude the p-value falls
+below your target FPR (α):
 
 | Level | Condition |
 |-------|-----------|
-| `None` | Both metrics within threshold |
-| `Low` | 1× threshold |
-| `Medium` | 2× threshold |
-| `High` | 4× threshold |
-| `Critical` | 8× threshold |
+| `None` | `p ≥ α` (within normal noise) |
+| `Low` | `α/10 ≤ p < α` |
+| `Medium` | `α/100 ≤ p < α/10` |
+| `High` | `α/1000 ≤ p < α/100` |
+| `Critical` | `p < α/1000` |
+
+Configure the single knob — and a richer baseline for more power — under
+`[alerts]` (`target_fpr`, `baseline_capture_runs`); see
+[`docs/THRESHOLD_TUNING.md`](docs/THRESHOLD_TUNING.md).
 
 ---
 
 ## Supported Providers
 
-| Provider | Embeddings | Completions |
+| Provider | Embeddings (→ drift) | Completions |
 |----------|-----------|-------------|
-| OpenAI | ✓ (`text-embedding-3-small`) | ✓ (`gpt-5.4`, `gpt-5.5`, etc.) |
-| Anthropic | — (not supported by API) | ✓ (`claude-*`) |
+| OpenAI | ✓ (`text-embedding-3-small` 1536d / `text-embedding-3-large` 3072d) | ✓ (`gpt-5.4`, `gpt-5.5`, etc.) |
+| Azure OpenAI | ✓ (when an embedding deployment is configured) | ✓ (per-deployment) |
+| Anthropic | — (no embedding API → completions-only, **no drift detection**) | ✓ (`claude-*`) |
 | Ollama (local) | ✓ | ✓ |
+
+Drift detection requires embeddings: providers without an embedding endpoint (or
+Azure without an embedding deployment) run completions-only and never produce a
+drift report. The probe fully declares its target (`provider` + model/deployment);
+the daemon constructs exactly that provider per run from the encrypted vault (the
+API key, keyed by provider type) plus `[providers.*]` config (base URLs,
+api-version, the Azure resource endpoint).
 
 ---
 
@@ -203,8 +222,10 @@ modelsentry/
 │   └── cli/                  # modelsentry CLI binary
 ├── web/                      # SvelteKit dashboard
 └── docs/
-    ├── ARCHITECTURE.md            # System design + engineering standards
-    ├── LOCAL_CI_GUIDE.md          # Local hooks / CI-equivalent checks
+    ├── ARCHITECTURE.md                  # System design + engineering standards
+    ├── DRIFT_DETECTION_METHODOLOGY.md   # The statistics behind drift detection
+    ├── THRESHOLD_TUNING.md              # Target-FPR tuning & baseline richness
+    ├── LOCAL_CI_GUIDE.md                # Local hooks / CI-equivalent checks
     └── RELEASE_READINESS_CHECKLIST.md
 ```
 
@@ -279,6 +300,8 @@ npm run check
 ## Documentation and Source of Truth
 
 - Architecture and engineering standards: `docs/ARCHITECTURE.md`
+- Drift detection methodology (the statistics): `docs/DRIFT_DETECTION_METHODOLOGY.md`
+- Target-FPR tuning & baseline richness: `docs/THRESHOLD_TUNING.md`
 - Local CI / git-hook checks: `docs/LOCAL_CI_GUIDE.md`
 - Release gate checklist: `docs/RELEASE_READINESS_CHECKLIST.md`
 

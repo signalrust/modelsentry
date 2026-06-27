@@ -1,6 +1,16 @@
 <script lang="ts">
   import { api } from '$lib/api.js';
-  import type { CreateProbeRequest, Probe, ProbePrompt, ProviderKind, ProbeSchedule } from '$lib/types.js';
+  import {
+    CUSTOM_MODEL,
+    DEFAULT_CRON,
+    DEFAULT_MODELS,
+    MODELS,
+    OLLAMA_DEFAULT_BASE_URL,
+    PROVIDER_KIND,
+    PROVIDER_LABELS,
+    type ProviderKindTag,
+  } from '$lib/constants.js';
+  import type { CreateProbeRequest, Probe, ProbePrompt, ProviderSpec, ProbeSchedule } from '$lib/types.js';
 
   let { oncreated, oncancel }: {
     oncreated: (probe: Probe) => void;
@@ -9,29 +19,39 @@
 
   // ── Form state ────────────────────────────────────────────────────────────
   let name = $state('');
-  let providerKind: 'open_ai' | 'anthropic' | 'ollama' | 'azure_open_ai' = $state('open_ai');
-  let ollamaBaseUrl = $state('http://localhost:11434');
-  let azureEndpoint = $state('');
-  let azureDeployment = $state('');
-  let model = $state('gpt-4o');
+  let providerKind: ProviderKindTag = $state(PROVIDER_KIND.OPEN_AI);
+  let ollamaBaseUrl = $state(OLLAMA_DEFAULT_BASE_URL);
+  // Azure: the resource endpoint and API key are configured server-side
+  // ([providers.azure] + vault). The probe only chooses the chat deployment
+  // (the model field) and, optionally, an embedding deployment for drift.
+  let azureEmbeddingDeployment = $state('');
+  let model = $state(DEFAULT_MODELS[PROVIDER_KIND.OPEN_AI]);
   let scheduleKind: 'every_minutes' | 'cron' = $state('every_minutes');
   let everyMinutes = $state(60);
-  let cronExpression = $state('0 * * * *');
+  let cronExpression = $state(DEFAULT_CRON);
   let prompts: Array<{ text: string; expected_contains: string; expected_not_contains: string }> = $state([
     { text: '', expected_contains: '', expected_not_contains: '' },
   ]);
   let submitting = $state(false);
   let formError: string | null = $state(null);
 
-  const defaultModels: Record<string, string> = {
-    open_ai: 'gpt-4o',
-    anthropic: 'claude-3-7-sonnet-20250219',
-    ollama: 'llama3',
-    azure_open_ai: 'gpt-4o',
-  };
+  // Model selection: providers with a preset list use a <select> (with a
+  // "Custom…" escape hatch); Ollama/Azure use free-text (open model space).
+  const modelOptions = $derived(MODELS[providerKind]);
+  const providerHasModelList = $derived(modelOptions.length > 0);
+  let useCustomModel = $state(false);
 
   function onProviderKindChange() {
-    model = defaultModels[providerKind] ?? '';
+    model = DEFAULT_MODELS[providerKind];
+    useCustomModel = false;
+  }
+
+  function onModelSelectChange() {
+    // The "Custom…" sentinel switches the field to a free-text input.
+    if (model === CUSTOM_MODEL) {
+      useCustomModel = true;
+      model = '';
+    }
   }
 
   function addPrompt() {
@@ -48,20 +68,18 @@
     formError = null;
     if (!name.trim()) { formError = 'Name is required.'; return; }
     if (!model.trim()) { formError = 'Model is required.'; return; }
-    if (providerKind === 'ollama' && !ollamaBaseUrl.trim()) { formError = 'Ollama base URL is required.'; return; }
-    if (providerKind === 'azure_open_ai' && (!azureEndpoint.trim() || !azureDeployment.trim())) {
-      formError = 'Azure endpoint and deployment are required.'; return;
-    }
+    if (providerKind === PROVIDER_KIND.OLLAMA && !ollamaBaseUrl.trim()) { formError = 'Ollama base URL is required.'; return; }
     const validPrompts = prompts.filter((p) => p.text.trim());
     if (validPrompts.length === 0) { formError = 'At least one prompt is required.'; return; }
 
     submitting = true;
     try {
-      let provider: ProviderKind;
-      if (providerKind === 'open_ai') provider = { kind: 'open_ai' };
-      else if (providerKind === 'anthropic') provider = { kind: 'anthropic' };
-      else if (providerKind === 'ollama') provider = { kind: 'ollama', base_url: ollamaBaseUrl.trim() };
-      else provider = { kind: 'azure_open_ai', endpoint: azureEndpoint.trim(), deployment: azureDeployment.trim() };
+      const trimmedModel = model.trim();
+      let provider: ProviderSpec;
+      if (providerKind === PROVIDER_KIND.OPEN_AI) provider = { kind: PROVIDER_KIND.OPEN_AI, model: trimmedModel };
+      else if (providerKind === PROVIDER_KIND.ANTHROPIC) provider = { kind: PROVIDER_KIND.ANTHROPIC, model: trimmedModel };
+      else if (providerKind === PROVIDER_KIND.OLLAMA) provider = { kind: PROVIDER_KIND.OLLAMA, model: trimmedModel, base_url: ollamaBaseUrl.trim() };
+      else provider = { kind: PROVIDER_KIND.AZURE, chat_deployment: trimmedModel, embedding_deployment: azureEmbeddingDeployment.trim() || null };
 
       let schedule: ProbeSchedule;
       if (scheduleKind === 'every_minutes') {
@@ -80,7 +98,6 @@
       const body: CreateProbeRequest = {
         name: name.trim(),
         provider,
-        model: model.trim(),
         prompts: builtPrompts,
         schedule,
       };
@@ -102,7 +119,7 @@
     <div class="error-banner form-error">{formError}</div>
   {/if}
 
-  <form onsubmit={(e: Event) => { e.preventDefault(); handleSubmit(); }}>
+  <form onsubmit={(e: Event) => { e.preventDefault(); void handleSubmit(); }}>
     <!-- Name -->
     <div class="field">
       <label for="probe-name">Name</label>
@@ -113,37 +130,53 @@
     <div class="field">
       <label for="probe-provider">Provider</label>
       <select id="probe-provider" bind:value={providerKind} onchange={onProviderKindChange}>
-        <option value="open_ai">OpenAI</option>
-        <option value="anthropic">Anthropic</option>
-        <option value="ollama">Ollama (self-hosted)</option>
-        <option value="azure_open_ai">Azure OpenAI</option>
+        <option value={PROVIDER_KIND.OPEN_AI}>{PROVIDER_LABELS[PROVIDER_KIND.OPEN_AI]}</option>
+        <option value={PROVIDER_KIND.ANTHROPIC}>{PROVIDER_LABELS[PROVIDER_KIND.ANTHROPIC]}</option>
+        <option value={PROVIDER_KIND.OLLAMA}>{PROVIDER_LABELS[PROVIDER_KIND.OLLAMA]} (self-hosted)</option>
+        <option value={PROVIDER_KIND.AZURE}>{PROVIDER_LABELS[PROVIDER_KIND.AZURE]}</option>
       </select>
     </div>
 
-    {#if providerKind === 'ollama'}
+    {#if providerKind === PROVIDER_KIND.OLLAMA}
       <div class="field">
         <label for="ollama-url">Ollama Base URL</label>
-        <input id="ollama-url" type="text" bind:value={ollamaBaseUrl} placeholder="http://localhost:11434" />
+        <input id="ollama-url" type="text" bind:value={ollamaBaseUrl} placeholder={OLLAMA_DEFAULT_BASE_URL} />
       </div>
     {/if}
 
-    {#if providerKind === 'azure_open_ai'}
-      <div class="field-row">
-        <div class="field">
-          <label for="azure-endpoint">Endpoint</label>
-          <input id="azure-endpoint" type="text" bind:value={azureEndpoint} placeholder="https://my-resource.openai.azure.com" />
-        </div>
-        <div class="field">
-          <label for="azure-deployment">Deployment</label>
-          <input id="azure-deployment" type="text" bind:value={azureDeployment} placeholder="gpt-4o" />
-        </div>
+    {#if providerKind === PROVIDER_KIND.AZURE}
+      <div class="field">
+        <label for="azure-embed-deployment">Embedding deployment <span class="field-hint">(optional)</span></label>
+        <input id="azure-embed-deployment" type="text" bind:value={azureEmbeddingDeployment} placeholder="text-embedding-3-small deployment" />
+        <p class="field-hint">
+          The resource endpoint and API key are configured server-side
+          (<code>[providers.azure]</code> + vault). The Model field below is the
+          chat deployment. Leave embedding deployment blank to run completions-only
+          (no drift detection).
+        </p>
       </div>
     {/if}
 
     <!-- Model -->
     <div class="field">
       <label for="probe-model">Model</label>
-      <input id="probe-model" type="text" bind:value={model} placeholder="e.g. gpt-4o" required />
+      {#if providerHasModelList && !useCustomModel}
+        <select id="probe-model" bind:value={model} onchange={onModelSelectChange}>
+          {#each modelOptions as m}
+            <option value={m}>{m}</option>
+          {/each}
+          <option value={CUSTOM_MODEL}>Custom…</option>
+        </select>
+      {:else}
+        <input id="probe-model" type="text" bind:value={model} placeholder="model name" required />
+        {#if providerHasModelList}
+          <button
+            type="button"
+            class="btn-link"
+            onclick={() => { useCustomModel = false; model = DEFAULT_MODELS[providerKind]; }}
+          >← choose from list</button>
+        {/if}
+      {/if}
     </div>
 
     <!-- Schedule -->
@@ -243,7 +276,22 @@
     gap: var(--sp-2);
   }
   .field-inline label { margin-bottom: 0; white-space: nowrap; }
-  .input-narrow { width: 7rem !important; }
+  /* Specificity (0,2,0) beats the global `.field input` (0,1,1) — no !important. */
+  .field-inline .input-narrow { width: 7rem; }
+
+  .btn-link {
+    margin-top: var(--sp-2);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--accent);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    padding: 0;
+    transition: opacity var(--transition);
+  }
+  .btn-link:hover { opacity: 0.7; }
 
   .prompts-header {
     display: flex;

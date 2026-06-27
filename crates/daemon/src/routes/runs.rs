@@ -98,9 +98,11 @@ mod tests {
     };
     use std::sync::Arc;
 
-    use crate::scheduler::new_registry;
     use crate::server::AppState;
-    use modelsentry_core::{alert::AlertEngine, drift::calculator::DriftCalculator};
+    use modelsentry_core::{
+        alert::AlertEngine,
+        drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
+    };
     use modelsentry_store::AppStore;
 
     fn open_store() -> (tempfile::TempDir, Arc<AppStore>) {
@@ -121,8 +123,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            providers: Arc::new(new_registry()),
-            calculator: Arc::new(DriftCalculator::new(0.5, 0.5).unwrap()),
+            calculator: Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             alert_engine: Arc::new(AlertEngine::default()),
             config: Arc::new(modelsentry_common::config::AppConfig {
                 server: ServerConfig {
@@ -140,11 +141,7 @@ mod tests {
                 scheduler: SchedulerConfig {
                     default_interval_minutes: 60,
                 },
-                alerts: AlertsConfig {
-                    drift_threshold_kl: 0.5,
-                    drift_threshold_cos: 0.5,
-                    allow_private_webhook_targets: false,
-                },
+                alerts: AlertsConfig::default(),
                 providers: ProvidersConfig::default(),
                 auth: AuthConfig::default(),
             }),

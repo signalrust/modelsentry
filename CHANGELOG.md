@@ -6,7 +6,52 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
-No unreleased changes.
+### Added
+
+- **Azure OpenAI provider.** Full adapter (deployment-based URLs, `api-version`
+  query param, `api-key` auth header, optional embedding deployment for drift).
+  Configured via `[providers.azure]` (resource endpoint, api-version, embedding
+  deployment) with the API key in the vault under `azure`.
+
+### Changed
+
+- **Unified provider subsystem.** `ProviderKind` → self-describing `ProviderSpec`
+  (the model/deployment and any instance address live in the spec); the dead,
+  silently-ignored top-level `Probe.model` field is removed. A single resolver
+  (`provider_factory::build_provider`) constructs the exact provider a probe
+  declares — secret from the vault (keyed by provider type), infrastructure from
+  `[providers.*]` config — replacing the in-memory provider registry and the two
+  duplicated `provider_key()` mappings. Providers are resolved per run, so a key
+  added to the vault takes effect on the next run with no restart.
+- **Vault API is store-only.** `PUT /api/vault/keys/{provider}` takes just
+  `{"key": "..."}` (the `model`/`base_url` override fields are gone); keys are
+  keyed by provider type (`openai`, `anthropic`, `azure`). Ollama needs no key.
+- All compile-time constants (provider timeouts, upstream header names, HTTP
+  body/rate limits, scheduler reconcile interval, run concurrency) are centralized
+  in the `constants` modules rather than declared inline in feature files.
+- **Drift detection rebuilt on a calibrated statistical foundation.** Runs now
+  embed the model's **completions** (not the fixed prompts) and compare per-prompt
+  output-embedding clouds to the baseline with a nonparametric two-sample test
+  (per-prompt **conformal** p-values combined with the **Šidák** correction, and a
+  pooled **MMD/energy** permutation-test fallback). A run alerts when its
+  calibrated `combined_p_value < target_fpr`, so the alert threshold *is* the
+  chosen false-positive rate. See `docs/DRIFT_DETECTION_METHODOLOGY.md`.
+- `AlertRule` now uses a single `target_fpr` instead of `kl_threshold` /
+  `cosine_threshold`; `[alerts]` config gains `target_fpr`, `baseline_capture_runs`,
+  and `permutations`.
+- `BaselineSnapshot` (schema v2) stores per-prompt output-embedding clouds
+  aggregated over recent runs; `DriftReport` carries `combined_p_value`,
+  `statistic`, `target_fpr`, `method`, a per-prompt breakdown, and an honest
+  `interpretation`. Existing v1 baselines are detected and rejected with a
+  re-capture message rather than silently misread.
+
+### Removed
+
+- Retired the discredited drift primitives — Gaussian `kl.rs`, `cosine.rs`,
+  `entropy.rs`, and per-probe `adaptive.rs` thresholds — along with `PITCH.md`,
+  whose framing was built on them. (`n ≪ d` embeddings make a Gaussian KL
+  singular; the kernel/conformal methods are nonparametric and valid in that
+  regime.)
 
 ## [0.1.0-init.0] - 2026-03-06
 

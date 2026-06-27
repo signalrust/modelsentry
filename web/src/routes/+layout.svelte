@@ -2,8 +2,18 @@
   import '../app.css';
   import { page } from '$app/state';
   import { onMount } from 'svelte';
+  import { auth } from '$lib/auth.svelte.js';
+  import { STORAGE_KEYS } from '$lib/constants.js';
+  import ApiKeyDialog from '$lib/components/ApiKeyDialog.svelte';
 
   let { children } = $props();
+
+  let authOpen = $state(false);
+
+  // Auto-open the key dialog when the daemon rejects a request with 401.
+  $effect(() => {
+    if (auth.unauthorized) authOpen = true;
+  });
 
   const THEMES = ['black', 'light', 'navy'] as const;
   type Theme = typeof THEMES[number];
@@ -14,13 +24,13 @@
   function setTheme(t: Theme) {
     theme = t;
     document.documentElement.setAttribute('data-theme', t);
-    try { localStorage.setItem('ms-theme', t); } catch {}
+    try { localStorage.setItem(STORAGE_KEYS.THEME, t); } catch {}
   }
 
   onMount(() => {
     let saved = 'black' as Theme;
     try {
-      const s = localStorage.getItem('ms-theme') as Theme | null;
+      const s = localStorage.getItem(STORAGE_KEYS.THEME) as Theme | null;
       if (s && THEMES.includes(s)) saved = s;
     } catch {}
     setTheme(saved);
@@ -60,6 +70,18 @@
   </div>
 
   <div class="header-right">
+    <!-- API key -->
+    <button
+      class="auth-btn"
+      class:has-key={auth.key}
+      class:alert={auth.unauthorized}
+      onclick={() => (authOpen = true)}
+      title={auth.key ? 'API key configured' : 'Set API key'}
+      aria-label="API key settings"
+    >
+      {auth.key ? '🔒' : '🔓'}
+    </button>
+
     <!-- Theme toggle -->
     <div class="theme-toggle">
       {#each THEMES as t}
@@ -73,6 +95,8 @@
     </div>
   </div>
 </header>
+
+<ApiKeyDialog bind:open={authOpen} />
 
 <!-- Sidebar overlay (mobile) -->
 <div

@@ -24,6 +24,10 @@ use secrecy::{ExposeSecret, SecretString};
 pub struct Vault {
     path: PathBuf,
     passphrase: SecretString,
+    /// Serializes the read-modify-write of mutating operations so two concurrent
+    /// `set_key`/`delete_key` calls cannot clobber each other's update
+    /// (decrypt → modify → re-encrypt is otherwise a lost-update race).
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for Vault {
@@ -31,7 +35,7 @@ impl std::fmt::Debug for Vault {
         f.debug_struct("Vault")
             .field("path", &self.path)
             .field("passphrase", &"[redacted]")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -47,6 +51,7 @@ impl Vault {
         let vault = Self {
             path: path.to_path_buf(),
             passphrase,
+            write_lock: std::sync::Mutex::new(()),
         };
         // Trial decryption to validate the passphrase up-front.
         vault.decrypt_vault()?;
@@ -63,6 +68,7 @@ impl Vault {
         let vault = Self {
             path: path.to_path_buf(),
             passphrase,
+            write_lock: std::sync::Mutex::new(()),
         };
         vault.encrypt_and_write(&BTreeMap::new())?;
         Ok(vault)
@@ -84,6 +90,10 @@ impl Vault {
     ///
     /// - [`ModelSentryError::Vault`] if decryption or re-encryption fails.
     pub fn set_key(&self, provider_id: &str, key: &ApiKey) -> Result<()> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut map = self.decrypt_vault()?;
         map.insert(provider_id.to_string(), key.expose().to_string());
         self.encrypt_and_write(&map)
@@ -96,6 +106,10 @@ impl Vault {
     ///
     /// - [`ModelSentryError::Vault`] if decryption or re-encryption fails.
     pub fn delete_key(&self, provider_id: &str) -> Result<bool> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut map = self.decrypt_vault()?;
         let removed = map.remove(provider_id).is_some();
         if removed {
@@ -177,8 +191,15 @@ impl Vault {
             message: format!("encryption finalisation failed: {e}"),
         })?;
 
-        std::fs::write(&self.path, &ciphertext).map_err(|e| ModelSentryError::Vault {
-            message: format!("cannot write vault file: {e}"),
+        // Atomic write: stage to a sibling temp file, then rename over the
+        // target. A crash mid-write can only leave the (discarded) temp file —
+        // never a truncated or half-encrypted vault that would lose every key.
+        let tmp_path = self.path.with_extension("tmp");
+        std::fs::write(&tmp_path, &ciphertext).map_err(|e| ModelSentryError::Vault {
+            message: format!("cannot write vault temp file: {e}"),
+        })?;
+        std::fs::rename(&tmp_path, &self.path).map_err(|e| ModelSentryError::Vault {
+            message: format!("cannot commit vault file: {e}"),
         })
     }
 }
@@ -271,6 +292,25 @@ mod tests {
 
         let key = vault.get_key("openai").unwrap().unwrap();
         assert_eq!(key.expose(), "new-key");
+    }
+
+    /// The atomic write must leave no stray `.tmp` file behind, and repeated
+    /// writes must keep the vault readable.
+    #[test]
+    fn atomic_write_leaves_no_temp_file_and_survives_repeated_writes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.age");
+        let vault = Vault::create(&path, passphrase("pw")).unwrap();
+
+        for i in 0..5 {
+            vault
+                .set_key("openai", &ApiKey::new(format!("key-{i}")))
+                .unwrap();
+        }
+
+        assert!(!path.with_extension("tmp").exists(), "temp file lingered");
+        let key = vault.get_key("openai").unwrap().unwrap();
+        assert_eq!(key.expose(), "key-4");
     }
 
     /// `list_providers` returns all provider IDs, sorted (`BTreeMap` order).
