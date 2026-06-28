@@ -103,6 +103,8 @@ const driftReportSchema = z.object({
   // Calibrated combined p-value (lower ⇒ stronger drift) and its −log₁₀ score.
   combined_p_value: z.number(),
   statistic: z.number(),
+  // Drift magnitude in null SDs (effect size). Defaulted for legacy reports.
+  effect_size: z.number().default(0),
   // The target false-positive rate the verdict was judged against.
   target_fpr: z.number(),
   // Which test ran: 'per_prompt_conformal' or 'pooled_two_sample'.

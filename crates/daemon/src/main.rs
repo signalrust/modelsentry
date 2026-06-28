@@ -11,9 +11,11 @@ use std::sync::Arc;
 
 use clap::Parser;
 use modelsentry_common::config::AppConfig;
+use modelsentry_common::constants::credential::SMTP_PASSWORD;
 use modelsentry_core::{
     alert::AlertEngine,
     drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
+    email::EmailMailer,
 };
 use modelsentry_daemon::{
     constants::alert::HTTP_TIMEOUT_SECS,
@@ -112,9 +114,38 @@ async fn main() -> anyhow::Result<()> {
         n_permutations: config.alerts.permutations,
         ..AssessmentConfig::default()
     }));
+    // Per-rule alert de-duplication window. `try_seconds` rejects out-of-range
+    // values; an absurd config falls back to "no cooldown" rather than panicking.
+    let alert_cooldown = chrono::Duration::try_seconds(
+        i64::try_from(config.alerts.cooldown_secs).unwrap_or(i64::MAX),
+    )
+    .unwrap_or_else(chrono::Duration::zero);
+
+    // Email channel: build the SMTP mailer once, pulling the password from the
+    // vault. A misconfigured block disables email (logged) instead of aborting
+    // startup — webhook/Slack alerts still work.
+    let mailer = match &config.alerts.smtp {
+        Some(smtp) => {
+            let password = vault.get_key(SMTP_PASSWORD)?;
+            match EmailMailer::from_config(smtp, password.as_ref()) {
+                Ok(mailer) => {
+                    tracing::info!(host = %smtp.host, "email alert channel configured");
+                    Some(Arc::new(mailer))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "email alert channel disabled: invalid [alerts.smtp]");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     let alert_engine = Arc::new(
         AlertEngine::new(http_client)
-            .with_allow_private_targets(config.alerts.allow_private_webhook_targets),
+            .with_allow_private_targets(config.alerts.allow_private_webhook_targets)
+            .with_cooldown(alert_cooldown)
+            .with_mailer(mailer),
     );
 
     // ── Provider resolution ──────────────────────────────────────────────
@@ -139,8 +170,9 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&calculator),
         Arc::clone(&alert_engine),
         config.alerts.samples_per_prompt,
+        config.scheduler.max_concurrent_runs,
     );
-    let _scheduler_handle = scheduler.start();
+    let scheduler_handle = scheduler.start();
     tracing::info!("scheduler started");
 
     // ── HTTP server ─────────────────────────────────────────────────────────
@@ -157,7 +189,12 @@ async fn main() -> anyhow::Result<()> {
         port = config.server.port,
         "starting HTTP server"
     );
+    // `run` returns when a shutdown signal (Ctrl+C / SIGTERM) drains the server;
+    // then stop the scheduler so in-flight probe loops abort cleanly.
     server::run(&config, state).await?;
+    tracing::info!("shutting down scheduler");
+    scheduler_handle.shutdown().await;
+    tracing::info!("shutdown complete");
 
     Ok(())
 }

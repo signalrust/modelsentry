@@ -49,6 +49,9 @@ pub enum ModelSentryError {
     #[error("vault error: {message}")]
     Vault { message: String },
 
+    #[error("email error: {message}")]
+    Email { message: String },
+
     #[error("configuration error: {message}")]
     Config { message: String },
 }

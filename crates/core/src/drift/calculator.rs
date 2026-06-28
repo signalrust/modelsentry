@@ -79,6 +79,7 @@ impl DriftCalculator {
                 prompt_index: p.prompt_index,
                 p_value: p.p_value,
                 n_baseline: p.n_baseline,
+                low_variance_baseline: p.low_variance_baseline,
             })
             .collect();
 
@@ -87,6 +88,7 @@ impl DriftCalculator {
             baseline_id: baseline.id.clone(),
             combined_p_value: assessment.combined_p_value,
             statistic: assessment.statistic,
+            effect_size: assessment.effect_size,
             target_fpr: self.config.target_fpr,
             method: assessment.method.to_string(),
             per_prompt,

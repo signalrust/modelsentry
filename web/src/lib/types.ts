@@ -69,6 +69,8 @@ export interface DriftReport {
   combined_p_value: number;
   /** Drift score = −log₁₀(combined_p_value); higher ⇒ stronger evidence. */
   statistic: number;
+  /** Drift magnitude in null standard deviations (effect size, not precision). */
+  effect_size: number;
   /** Target false-positive rate this report was judged against. */
   target_fpr: number;
   /** Test that produced the verdict (`per_prompt_conformal` / `pooled_two_sample`). */

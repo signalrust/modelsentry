@@ -29,18 +29,10 @@
 //! is ~Uniform(0, 1), so alerting when `p < α` yields a false-positive rate of
 //! approximately `α` — the threshold *is* the target FPR, by construction.
 
+use modelsentry_common::constants::drift::{
+    BANDWIDTH_FLOOR, MIN_SAMPLES_PER_GROUP, PERMUTATION_TOLERANCE, STD_FLOOR,
+};
 use modelsentry_common::error::{ModelSentryError, Result};
-
-/// Minimum samples per group required for the unbiased MMD² estimator
-/// (`1 / (m (m − 1))` needs `m ≥ 2`).
-const MIN_SAMPLES_PER_GROUP: usize = 2;
-
-/// Floor applied to the RBF bandwidth so identical pooled points (median
-/// pairwise distance 0) do not produce a degenerate kernel.
-const BANDWIDTH_FLOOR: f32 = 1e-6;
-
-/// Tolerance when counting permutation statistics `≥` the observed value.
-const PERMUTATION_TOLERANCE: f32 = 1e-6;
 
 /// Kernel choice for the two-sample statistic.
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +64,12 @@ pub struct TwoSampleOutcome {
     /// Permutation p-value in `[0, 1]`. Calibrated so that thresholding at `α`
     /// gives a false-positive rate of ≈ `α`. Lower ⇒ stronger drift evidence.
     pub p_value: f32,
+    /// Interpretable drift **magnitude**: the observed statistic standardized
+    /// against the permutation null (`(observed − mean) / sd`, floored at 0).
+    /// Unlike the p-value (which a large baseline can drive arbitrarily low for
+    /// a trivial shift), this measures *how far* the run moved, in standard
+    /// deviations of the no-drift null. ~0 ⇒ within noise; larger ⇒ bigger shift.
+    pub effect_size: f32,
     /// Baseline sample size.
     pub n_baseline: usize,
     /// Run sample size.
@@ -81,8 +79,17 @@ pub struct TwoSampleOutcome {
 }
 
 /// Squared Euclidean distance between two equal-length vectors.
-fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
+///
+/// Accumulated in `f64`: embeddings are high-dimensional (1536/3072), so summing
+/// that many squared `f32` differences in `f32` loses meaningful precision.
+fn sq_dist(a: &[f32], b: &[f32]) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let d = f64::from(*x) - f64::from(*y);
+            d * d
+        })
+        .sum()
 }
 
 /// Median of the pairwise Euclidean distances over `points` — the classic RBF
@@ -93,36 +100,41 @@ fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Does not panic: the internal sort uses a total order over finite distances.
 #[must_use]
-pub fn median_heuristic_bandwidth(points: &[Vec<f32>]) -> f32 {
-    let mut dists: Vec<f32> = Vec::new();
+pub fn median_heuristic_bandwidth(points: &[Vec<f32>]) -> f64 {
+    let mut dists: Vec<f64> = Vec::new();
     for (i, a) in points.iter().enumerate() {
         for b in points.iter().skip(i + 1) {
             dists.push(sq_dist(a, b).sqrt());
         }
     }
     if dists.is_empty() {
-        return BANDWIDTH_FLOOR;
+        return f64::from(BANDWIDTH_FLOOR);
     }
     dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = dists.len() / 2;
     let median = if dists.len() % 2 == 0 {
         // Average the two central order statistics.
-        f32::midpoint(
+        f64::midpoint(
             dists.get(mid - 1).copied().unwrap_or(0.0),
             dists.get(mid).copied().unwrap_or(0.0),
         )
     } else {
         dists.get(mid).copied().unwrap_or(0.0)
     };
-    median.max(BANDWIDTH_FLOOR)
+    median.max(f64::from(BANDWIDTH_FLOOR))
 }
 
 /// Build the dense kernel (Gram) matrix over `points`, row-major `N × N`.
-fn gram_matrix(points: &[Vec<f32>], kernel: Kernel) -> Vec<f32> {
+///
+/// Stored and accumulated in `f64` — the statistic sums up to `(m + n)²` of these
+/// entries, so `f32` accumulation would compound rounding error.
+fn gram_matrix(points: &[Vec<f32>], kernel: Kernel) -> Vec<f64> {
     let n = points.len();
-    let mut gram = vec![0.0_f32; n * n];
+    let mut gram = vec![0.0_f64; n * n];
     let bandwidth = match kernel {
-        Kernel::Rbf { bandwidth } if bandwidth.is_finite() && bandwidth > 0.0 => bandwidth,
+        Kernel::Rbf { bandwidth } if bandwidth.is_finite() && bandwidth > 0.0 => {
+            f64::from(bandwidth)
+        }
         Kernel::Rbf { .. } => median_heuristic_bandwidth(points),
         Kernel::Energy => 0.0,
     };
@@ -149,10 +161,10 @@ fn gram_matrix(points: &[Vec<f32>], kernel: Kernel) -> Vec<f32> {
 /// `unbiased` excludes diagonal (self) terms — required for the unbiased MMD²
 /// estimator; the energy distance uses the biased form (its diagonal terms are
 /// zero anyway, since `k(a, a) = 0`).
-fn statistic_from_gram(gram: &[f32], n: usize, perm: &[usize], m: usize, unbiased: bool) -> f32 {
+fn statistic_from_gram(gram: &[f64], n: usize, perm: &[usize], m: usize, unbiased: bool) -> f64 {
     let total = perm.len();
     let nn = total - m;
-    let at = |a: usize, b: usize| -> f32 {
+    let at = |a: usize, b: usize| -> f64 {
         let (ia, ib) = (
             perm.get(a).copied().unwrap_or(0),
             perm.get(b).copied().unwrap_or(0),
@@ -160,7 +172,7 @@ fn statistic_from_gram(gram: &[f32], n: usize, perm: &[usize], m: usize, unbiase
         gram.get(ia * n + ib).copied().unwrap_or(0.0)
     };
 
-    let mut within_first = 0.0;
+    let mut within_first = 0.0_f64;
     for a in 0..m {
         for b in 0..m {
             if unbiased && a == b {
@@ -169,7 +181,7 @@ fn statistic_from_gram(gram: &[f32], n: usize, perm: &[usize], m: usize, unbiase
             within_first += at(a, b);
         }
     }
-    let mut within_second = 0.0;
+    let mut within_second = 0.0_f64;
     for a in m..total {
         for b in m..total {
             if unbiased && a == b {
@@ -178,7 +190,7 @@ fn statistic_from_gram(gram: &[f32], n: usize, perm: &[usize], m: usize, unbiase
             within_second += at(a, b);
         }
     }
-    let mut across = 0.0;
+    let mut across = 0.0_f64;
     for a in 0..m {
         for b in m..total {
             across += at(a, b);
@@ -186,9 +198,9 @@ fn statistic_from_gram(gram: &[f32], n: usize, perm: &[usize], m: usize, unbiase
     }
 
     #[allow(clippy::cast_precision_loss)]
-    let group_first = m as f32;
+    let group_first = m as f64;
     #[allow(clippy::cast_precision_loss)]
-    let group_second = nn as f32;
+    let group_second = nn as f64;
     let denom_first = if unbiased {
         group_first * (group_first - 1.0)
     } else {
@@ -242,13 +254,10 @@ pub fn mmd2_unbiased(x: &[Vec<f32>], y: &[Vec<f32>], bandwidth: f32) -> Result<f
     let pooled: Vec<Vec<f32>> = x.iter().chain(y.iter()).cloned().collect();
     let gram = gram_matrix(&pooled, Kernel::Rbf { bandwidth });
     let perm: Vec<usize> = (0..pooled.len()).collect();
-    Ok(statistic_from_gram(
-        &gram,
-        pooled.len(),
-        &perm,
-        x.len(),
-        true,
-    ))
+    // f64 accumulation → f32 report value at the public boundary.
+    #[allow(clippy::cast_possible_truncation)]
+    let stat = statistic_from_gram(&gram, pooled.len(), &perm, x.len(), true) as f32;
+    Ok(stat)
 }
 
 /// Energy distance between `x` and `y` (parameter-free).
@@ -261,13 +270,10 @@ pub fn energy_distance(x: &[Vec<f32>], y: &[Vec<f32>]) -> Result<f32> {
     let pooled: Vec<Vec<f32>> = x.iter().chain(y.iter()).cloned().collect();
     let gram = gram_matrix(&pooled, Kernel::Energy);
     let perm: Vec<usize> = (0..pooled.len()).collect();
-    Ok(statistic_from_gram(
-        &gram,
-        pooled.len(),
-        &perm,
-        x.len(),
-        false,
-    ))
+    // f64 accumulation → f32 report value at the public boundary.
+    #[allow(clippy::cast_possible_truncation)]
+    let stat = statistic_from_gram(&gram, pooled.len(), &perm, x.len(), false) as f32;
+    Ok(stat)
 }
 
 /// Run a permutation two-sample test of `baseline` vs `run`.
@@ -299,10 +305,39 @@ pub fn two_sample_test(
     Ok(TwoSampleOutcome {
         statistic: observed,
         p_value,
+        effect_size: standardized_excursion(observed, &nulls),
         n_baseline: baseline.len(),
         n_run: run.len(),
         n_permutations,
     })
+}
+
+/// Standardized positive excursion of `observed` over the permutation `nulls`:
+/// `max((observed − mean) / sd, 0)`, with the standard deviation floored by
+/// [`STD_FLOOR`]. This is the effect size reported alongside the p-value — a
+/// magnitude in null standard deviations, not a significance. Returns 0 when
+/// there are no nulls to standardize against.
+fn standardized_excursion(observed: f32, nulls: &[f32]) -> f32 {
+    let n = nulls.len();
+    if n == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let count = n as f64;
+    let observed = f64::from(observed);
+    let mean = nulls.iter().map(|&x| f64::from(x)).sum::<f64>() / count;
+    let var = nulls
+        .iter()
+        .map(|&x| {
+            let d = f64::from(x) - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / count;
+    let sd = var.sqrt().max(f64::from(STD_FLOOR));
+    #[allow(clippy::cast_possible_truncation)]
+    let z = ((observed - mean) / sd).max(0.0) as f32;
+    z
 }
 
 /// Observed statistic plus the **permutation null distribution** (the `n_perm`
@@ -331,14 +366,18 @@ pub fn permutation_nulls(
 
     let gram = gram_matrix(&pooled, kernel);
     let identity: Vec<usize> = (0..total).collect();
-    let observed = statistic_from_gram(&gram, total, &identity, m, unbiased);
+    // Each statistic is accumulated in f64, then rounded to the f32 report grid.
+    #[allow(clippy::cast_possible_truncation)]
+    let observed = statistic_from_gram(&gram, total, &identity, m, unbiased) as f32;
 
     let mut rng = SplitMix64::new(seed);
     let mut perm = identity;
     let mut nulls = Vec::with_capacity(n_permutations);
     for _ in 0..n_permutations {
         fisher_yates(&mut perm, &mut rng);
-        nulls.push(statistic_from_gram(&gram, total, &perm, m, unbiased));
+        #[allow(clippy::cast_possible_truncation)]
+        let stat = statistic_from_gram(&gram, total, &perm, m, unbiased) as f32;
+        nulls.push(stat);
     }
     Ok((observed, nulls))
 }
@@ -473,6 +512,24 @@ mod tests {
     }
 
     #[test]
+    fn effect_size_is_near_zero_for_no_drift_and_large_under_strong_drift() {
+        let base = cluster(15, 5, 0.0, 0.15);
+        let same = cluster(15, 5, 0.0, 0.15);
+        let drifted = cluster(15, 5, 6.0, 0.15);
+        let e_same = two_sample_test(&base, &same, Kernel::Energy, 200, 9)
+            .unwrap()
+            .effect_size;
+        let e_drift = two_sample_test(&base, &drifted, Kernel::Energy, 200, 9)
+            .unwrap()
+            .effect_size;
+        assert!(e_same >= 0.0, "effect size is a non-negative magnitude");
+        assert!(
+            e_drift > e_same + 1.0,
+            "strong drift should have a much larger magnitude: same={e_same}, drift={e_drift}"
+        );
+    }
+
+    #[test]
     fn permutation_pvalue_is_not_significant_under_no_drift() {
         // Two interleaved samples from the same lattice — no real drift.
         let a = cluster(20, 5, 0.0, 0.2);
@@ -519,6 +576,6 @@ mod tests {
         assert!(median_heuristic_bandwidth(&pts) > 0.0);
         // Degenerate (all identical) falls back to the floor, not zero.
         let same = vec![vec![1.0, 1.0]; 5];
-        assert!(median_heuristic_bandwidth(&same) >= BANDWIDTH_FLOOR);
+        assert!(median_heuristic_bandwidth(&same) >= f64::from(BANDWIDTH_FLOOR));
     }
 }

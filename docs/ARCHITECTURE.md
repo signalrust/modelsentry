@@ -101,7 +101,8 @@ modelsentry/
 │   │       ├── probe_store.rs
 │   │       ├── baseline_store.rs
 │   │       ├── run_store.rs
-│   │       └── alert_store.rs
+│   │       ├── alert_store.rs
+│   │       └── schedule_store.rs ← per-probe next-run state (restart catch-up)
 │   │
 │   ├── daemon/                 ← binary: tokio runtime, scheduler, REST API
 │   │   ├── Cargo.toml
@@ -180,6 +181,7 @@ modelsentry/
 | `tower-http` | 0.6 | CORS, ServeDir, request logging |
 | `hyper` | 1.x | HTTP client/server (used by axum internally) |
 | `reqwest` | 0.12 | HTTP client for LLM provider API calls |
+| `lettre` | 0.11 | Async SMTP client (rustls TLS) for the email alert channel |
 | `serde` | 1.x | Serialization framework |
 | `serde_json` | 1.x | JSON encoding/decoding |
 | `toml` | 1.x | Config file parsing |

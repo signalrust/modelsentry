@@ -51,6 +51,15 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SchedulerConfig {
     pub default_interval_minutes: u32,
+    /// Maximum probe runs executing at once across all probes. Bounds the total
+    /// load on a provider so a fleet of probes (or a restart that finds several
+    /// overdue) cannot stampede it. Defaults to 8; must be ≥ 1.
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
+}
+
+fn default_max_concurrent_runs() -> usize {
+    crate::constants::scheduler::MAX_CONCURRENT_RUNS
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,22 +87,79 @@ pub struct AlertsConfig {
     /// rank-limited) single-sample mode. Each sample is one provider call.
     #[serde(default = "default_samples_per_prompt")]
     pub samples_per_prompt: usize,
+    /// Minimum seconds between alert notifications for the same rule. Within this
+    /// window a rule that keeps firing is **de-duplicated**: the drift run is
+    /// still recorded, but no new notification/event is emitted. `target_fpr` is
+    /// per-run, so without a cooldown a persistently-drifted (or repeatedly
+    /// noisy) probe would re-alert every scheduled run. `0` disables it. The
+    /// password for the SMTP channel below lives in the vault, not here.
+    #[serde(default = "default_cooldown_secs")]
+    pub cooldown_secs: u64,
+    /// SMTP settings for the email alert channel. Absent ⇒ email alerts are
+    /// logged-and-skipped; present ⇒ the daemon builds a mailer at startup. The
+    /// password is read from the vault (key `smtp`), never from this file.
+    #[serde(default)]
+    pub smtp: Option<SmtpConfig>,
+}
+
+/// SMTP settings for the email alert channel.
+///
+/// `host` and `from` are required when this block is present; the password is
+/// stored in the vault under [`crate::constants::credential::SMTP_PASSWORD`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct SmtpConfig {
+    /// SMTP server hostname (e.g. `smtp.example.com`).
+    pub host: String,
+    /// Submission port. Defaults to 587 (STARTTLS submission).
+    #[serde(default = "default_smtp_port")]
+    pub port: u16,
+    /// From / envelope address, e.g. `ModelSentry <alerts@example.com>`.
+    pub from: String,
+    /// Username for SMTP authentication. Omit (together with no vault password)
+    /// for an unauthenticated relay. The password is read from the vault.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Transport security mode.
+    #[serde(default)]
+    pub security: SmtpSecurity,
+}
+
+fn default_smtp_port() -> u16 {
+    crate::constants::alerts::SMTP_PORT
+}
+
+/// SMTP transport security mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmtpSecurity {
+    /// Upgrade a plaintext connection with STARTTLS (submission port 587). The
+    /// secure default.
+    #[default]
+    StartTls,
+    /// Implicit TLS from connect (SMTPS, port 465).
+    Tls,
+    /// No encryption — localhost / testing only.
+    None,
 }
 
 fn default_target_fpr() -> f32 {
-    0.01
+    crate::constants::alerts::TARGET_FPR
 }
 
 fn default_baseline_capture_runs() -> usize {
-    20
+    crate::constants::alerts::BASELINE_CAPTURE_RUNS
 }
 
 fn default_permutations() -> usize {
-    200
+    crate::constants::alerts::PERMUTATIONS
 }
 
 fn default_samples_per_prompt() -> usize {
-    3
+    crate::constants::alerts::SAMPLES_PER_PROMPT
+}
+
+fn default_cooldown_secs() -> u64 {
+    crate::constants::alerts::COOLDOWN_SECS
 }
 
 impl Default for AlertsConfig {
@@ -104,6 +170,8 @@ impl Default for AlertsConfig {
             baseline_capture_runs: default_baseline_capture_runs(),
             permutations: default_permutations(),
             samples_per_prompt: default_samples_per_prompt(),
+            cooldown_secs: default_cooldown_secs(),
+            smtp: None,
         }
     }
 }
@@ -306,6 +374,11 @@ impl AppConfig {
                 message: "alerts.target_fpr must be in the open interval (0, 1)".to_string(),
             });
         }
+        if self.scheduler.max_concurrent_runs == 0 {
+            return Err(ModelSentryError::Config {
+                message: "scheduler.max_concurrent_runs must be at least 1".to_string(),
+            });
+        }
         if self.auth.enabled && self.auth.api_keys.is_empty() {
             return Err(ModelSentryError::Config {
                 message: "auth.api_keys must contain at least one key when auth is enabled"
@@ -381,6 +454,7 @@ mod tests {
             },
             scheduler: SchedulerConfig {
                 default_interval_minutes: 60,
+                max_concurrent_runs: 8,
             },
             alerts: AlertsConfig::default(),
             providers: ProvidersConfig::default(),
@@ -419,6 +493,14 @@ mod tests {
         let mut cfg = test_config();
         cfg.alerts.target_fpr = 0.01;
         cfg.validate().expect("0.01 is a valid FPR");
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_max_concurrent_runs() {
+        let mut cfg = test_config();
+        cfg.scheduler.max_concurrent_runs = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_concurrent_runs"), "{err}");
     }
 
     #[test]

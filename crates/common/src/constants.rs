@@ -1,14 +1,17 @@
-//! Single source of truth for the identifier-like "magic strings" shared across
-//! the workspace.
+//! Single application-wide source of truth for compile-time constants.
 //!
-//! Only **stable identifiers** live here — strings that are matched, dispatched
-//! on, or used as persistence/protocol keys, and that would silently break if a
-//! copy in one crate drifted from a copy in another:
+//! Every constant the workspace shares or tunes lives here, grouped by concern,
+//! so a value is defined once and never redeclared (or silently diverged) across
+//! crates:
 //!
 //! - [`provider`] — registry / vault / dispatch keys for each LLM provider.
+//! - [`credential`] — vault keys for secrets that are not provider API keys.
 //! - [`method`] — drift-assessment method tags recorded in `DriftReport::method`.
 //! - [`table`] — `redb` table names (the persistence key namespace).
 //! - [`header`] — HTTP header names for the daemon's own API.
+//! - [`defaults`] — provider model IDs, base URLs, embedding dims, timeouts.
+//! - [`drift`] — numeric floors/tolerances shared by the drift algorithms.
+//! - [`alerts`] — alerting defaults (target FPR, capture depth, cooldown, SMTP).
 //!
 //! Human-readable text (error messages, log lines, UI copy) is intentionally
 //! **not** centralized here: it belongs next to the code that emits it. Likewise,
@@ -31,6 +34,13 @@ pub mod provider {
     /// Azure OpenAI. Registry keys are namespaced as
     /// `azure:<endpoint>:<deployment>`.
     pub const AZURE: &str = "azure";
+}
+
+/// Vault keys for secrets that are not provider API keys.
+pub mod credential {
+    /// Vault key under which the SMTP password for the email alert channel is
+    /// stored (the rest of the SMTP settings are in `[alerts.smtp]` config).
+    pub const SMTP_PASSWORD: &str = "smtp";
 }
 
 /// Drift-assessment method tags, recorded in `DriftReport::method` so a report
@@ -57,6 +67,9 @@ pub mod table {
     pub const ALERT_RULES: &str = "alert_rules";
     /// Fired alert events.
     pub const ALERT_EVENTS: &str = "alert_events";
+    /// Per-probe scheduler state (the next scheduled run time), so the daemon
+    /// resumes each probe's cadence across restarts instead of re-phasing it.
+    pub const SCHEDULE_STATE: &str = "schedule_state";
 }
 
 /// HTTP header names for the daemon's own API.
@@ -136,4 +149,66 @@ pub mod defaults {
         /// Auth request header name (vs OpenAI's `Authorization: Bearer`).
         pub const API_KEY_HEADER: &str = "api-key";
     }
+}
+
+/// Numeric floors and tolerances shared by the drift algorithms (two-sample,
+/// conformal, and stratified-permutation paths). Centralized so the same
+/// guard value cannot diverge between `twosample` and `assessment`.
+pub mod drift {
+    /// Minimum samples per group for the unbiased MMD² estimator
+    /// (`1 / (m (m − 1))` needs `m ≥ 2`).
+    pub const MIN_SAMPLES_PER_GROUP: usize = 2;
+
+    /// Floor applied to the RBF bandwidth so identical pooled points (median
+    /// pairwise distance 0) do not produce a degenerate kernel.
+    pub const BANDWIDTH_FLOOR: f32 = 1e-6;
+
+    /// Floor on a standard deviation before dividing by it when standardizing
+    /// scores/statistics, so a near-deterministic (temperature-0 / cached)
+    /// baseline cloud does not divide by ~0.
+    pub const STD_FLOOR: f32 = 1e-6;
+
+    /// Tolerance when counting permutation statistics `≥` the observed value.
+    pub const PERMUTATION_TOLERANCE: f32 = 1e-6;
+
+    /// Minimum RMS spread (cloud radius) a baseline cloud must have for its
+    /// drift verdict to be meaningful. Below this the points are effectively
+    /// identical (temperature-0 / cached / deterministic outputs), so the test
+    /// measures embedding noise rather than behavioural drift — the report flags
+    /// such prompts so the operator does not trust a spurious signal. Embeddings
+    /// here are O(0.1–1) apart, so `1e-3` flags only genuine degeneracy.
+    pub const BASELINE_MIN_CLOUD_SPREAD: f32 = 1e-3;
+}
+
+/// Alerting defaults — the fallback values for `[alerts]` config and the alert
+/// engine. Operator-overridable in `config/default.toml`; these are the
+/// single-sourced defaults the deserializer falls back to.
+pub mod alerts {
+    /// Default calibrated false-positive rate a run is alerted at.
+    pub const TARGET_FPR: f32 = 0.01;
+
+    /// Default number of recent successful runs aggregated into a baseline.
+    pub const BASELINE_CAPTURE_RUNS: usize = 20;
+
+    /// Default permutations for the pooled-fallback two-sample test.
+    pub const PERMUTATIONS: usize = 200;
+
+    /// Default completions sampled per prompt on each run.
+    pub const SAMPLES_PER_PROMPT: usize = 3;
+
+    /// Default minimum seconds between alert notifications for one rule
+    /// (de-duplication / cooldown window). One hour. `0` disables.
+    pub const COOLDOWN_SECS: u64 = 3600;
+
+    /// Default SMTP submission port (RFC 6409 STARTTLS submission).
+    pub const SMTP_PORT: u16 = 587;
+}
+
+/// Scheduler defaults.
+pub mod scheduler {
+    /// Default cap on the number of probe runs executing concurrently across all
+    /// probes. Each run may itself fan out up to the per-run prompt concurrency,
+    /// so this bounds the total outbound load a fleet of probes puts on one
+    /// provider (avoiding a restart/​reconcile stampede). Must be ≥ 1.
+    pub const MAX_CONCURRENT_RUNS: usize = 8;
 }

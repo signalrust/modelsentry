@@ -1,17 +1,22 @@
 //! Alert engine — evaluates [`DriftReport`]s against [`AlertRule`]s and fires
 //! notifications to configured channels.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-use modelsentry_common::models::{AlertChannel, AlertEvent, AlertRule, DriftReport};
+use modelsentry_common::models::{AlertChannel, AlertEvent, AlertRule, DriftLevel, DriftReport};
+use modelsentry_common::types::AlertRuleId;
+
+use crate::email::EmailMailer;
 
 /// Evaluates drift reports against alert rules and fires notifications over
-/// HTTP webhooks, Slack, or (in a future task) email.
+/// HTTP webhooks, Slack, or email (SMTP).
 ///
-/// Cheaply cloneable via the inner [`reqwest::Client`].
+/// Cheaply cloneable via the inner [`reqwest::Client`] and shared mailer.
 #[derive(Clone)]
 pub struct AlertEngine {
     http_client: reqwest::Client,
@@ -22,6 +27,15 @@ pub struct AlertEngine {
     /// rule would otherwise open. Set `true` only for trusted internal
     /// receivers.
     allow_private_targets: bool,
+    /// Minimum gap between notifications for the same rule. A triggered rule
+    /// whose previous fire was less than this ago is **de-duplicated** (no new
+    /// event/notification), bounding repeat alerts on persistently-drifted or
+    /// chronically-noisy probes. [`Duration::zero`] (the default) disables it.
+    cooldown: Duration,
+    /// SMTP mailer for the email channel, built at startup from `[alerts.smtp]`.
+    /// `None` ⇒ email is unconfigured, so [`AlertChannel::Email`] is logged and
+    /// skipped rather than silently dropped.
+    mailer: Option<Arc<EmailMailer>>,
 }
 
 impl AlertEngine {
@@ -34,6 +48,8 @@ impl AlertEngine {
         Self {
             http_client,
             allow_private_targets: false,
+            cooldown: Duration::zero(),
+            mailer: None,
         }
     }
 
@@ -45,8 +61,31 @@ impl AlertEngine {
         self
     }
 
-    /// Evaluate `report` against every active rule. For each triggered rule,
-    /// fire all configured channels and collect the resulting [`AlertEvent`]s.
+    /// Set the per-rule alert cooldown / de-duplication window. A non-positive
+    /// duration disables it (every triggered run alerts). Defaults to disabled.
+    #[must_use]
+    pub fn with_cooldown(mut self, cooldown: Duration) -> Self {
+        self.cooldown = cooldown;
+        self
+    }
+
+    /// Attach the SMTP mailer used by the email channel. `None` (the default)
+    /// leaves email unconfigured: email alerts are logged and skipped.
+    #[must_use]
+    pub fn with_mailer(mut self, mailer: Option<Arc<EmailMailer>>) -> Self {
+        self.mailer = mailer;
+        self
+    }
+
+    /// Evaluate `report` against every active rule. For each triggered rule that
+    /// is **not** within its cooldown window, fire all configured channels and
+    /// collect the resulting [`AlertEvent`]s.
+    ///
+    /// `last_fired` maps a rule id to the timestamp it most recently fired (the
+    /// caller loads this from the store); a rule absent from the map has never
+    /// fired. A triggered rule whose last fire is newer than [`Self::cooldown`]
+    /// is de-duplicated — the run is still assessed, only the notification is
+    /// suppressed.
     ///
     /// Channel delivery errors are logged at `WARN` level but do not abort
     /// processing of other rules or channels.
@@ -54,27 +93,51 @@ impl AlertEngine {
         &self,
         report: &DriftReport,
         rules: &[AlertRule],
+        last_fired: &HashMap<AlertRuleId, DateTime<Utc>>,
     ) -> Vec<AlertEvent> {
         let mut events = Vec::new();
+        let now = Utc::now();
         for rule in rules {
-            if !rule.active {
+            if !rule.active || !Self::is_triggered(report, rule) {
                 continue;
             }
-            if Self::is_triggered(report, rule) {
-                let event = AlertEvent {
-                    id: Uuid::new_v4(),
-                    rule_id: rule.id.clone(),
-                    drift_report: report.clone(),
-                    fired_at: Utc::now(),
-                    acknowledged: false,
-                };
-                for channel in &rule.channels {
-                    self.fire_channel(channel, &event).await;
-                }
-                events.push(event);
+            if self.in_cooldown(rule, last_fired, now) {
+                tracing::debug!(
+                    rule_id = %rule.id,
+                    "alert de-duplicated: rule fired within its cooldown window",
+                );
+                continue;
             }
+            let event = AlertEvent {
+                id: Uuid::new_v4(),
+                rule_id: rule.id.clone(),
+                drift_report: report.clone(),
+                fired_at: now,
+                acknowledged: false,
+            };
+            for channel in &rule.channels {
+                self.fire_channel(channel, &event).await;
+            }
+            events.push(event);
         }
         events
+    }
+
+    /// Whether `rule` is inside its cooldown window at `now` (its last fire was
+    /// less than [`Self::cooldown`] ago). Always `false` when the cooldown is
+    /// disabled or the rule has never fired.
+    fn in_cooldown(
+        &self,
+        rule: &AlertRule,
+        last_fired: &HashMap<AlertRuleId, DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self.cooldown <= Duration::zero() {
+            return false;
+        }
+        last_fired
+            .get(&rule.id)
+            .is_some_and(|&last| now - last < self.cooldown)
     }
 
     /// Returns `true` if the run's calibrated p-value clears the rule's target
@@ -104,10 +167,47 @@ impl AlertEngine {
                     tracing::info!("webhook fired successfully to {url}");
                 }
             }
-            AlertChannel::Email { address } => {
-                // TODO(Task 5.1): email via SMTP — skipped for now
-                tracing::info!("alert email would be sent to {address}");
-            }
+            AlertChannel::Email { address } => self.send_email(address, event).await,
+        }
+    }
+
+    /// Deliver `event` to `address` over SMTP. If no mailer is configured
+    /// (`[alerts.smtp]` absent), the alert is logged and skipped rather than
+    /// silently dropped. Delivery failures are logged at `WARN`.
+    async fn send_email(&self, address: &str, event: &AlertEvent) {
+        let Some(mailer) = self.mailer.as_ref() else {
+            tracing::warn!("email alert to {address} skipped: no SMTP configured ([alerts.smtp])");
+            return;
+        };
+        let report = &event.drift_report;
+        let subject = format!(
+            "[ModelSentry] {} drift alert",
+            drift_level_label(&report.drift_level)
+        );
+        let body = format!(
+            "ModelSentry detected drift.\n\n\
+             Level:        {level}\n\
+             Combined p:   {p:.6} (target FPR {fpr:.6})\n\
+             Magnitude:    {effect:.1} SD\n\
+             Method:       {method}\n\
+             Fired at:     {fired_at}\n\
+             Rule:         {rule}\n\
+             Run:          {run}\n\n\
+             {interpretation}\n",
+            level = drift_level_label(&report.drift_level),
+            p = report.combined_p_value,
+            fpr = report.target_fpr,
+            effect = report.effect_size,
+            method = report.method,
+            fired_at = event.fired_at,
+            rule = event.rule_id,
+            run = report.run_id,
+            interpretation = report.interpretation,
+        );
+        if let Err(e) = mailer.send(address, &subject, &body).await {
+            tracing::warn!("failed to send alert email to {address}: {e}");
+        } else {
+            tracing::info!("alert email sent to {address}");
         }
     }
 
@@ -179,6 +279,17 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Human-readable label for a [`DriftLevel`], used in alert subjects/bodies.
+fn drift_level_label(level: &DriftLevel) -> &'static str {
+    match level {
+        DriftLevel::None => "No",
+        DriftLevel::Low => "Low",
+        DriftLevel::Medium => "Medium",
+        DriftLevel::High => "High",
+        DriftLevel::Critical => "Critical",
+    }
+}
+
 impl Default for AlertEngine {
     fn default() -> Self {
         Self::new(reqwest::Client::new())
@@ -199,6 +310,8 @@ mod tests {
             baseline_id: BaselineId::new(),
             combined_p_value,
             statistic: -(combined_p_value.max(f32::MIN_POSITIVE)).log10(),
+            // Fixture magnitude derived from the p-value (no standalone literal).
+            effect_size: -(combined_p_value.max(f32::MIN_POSITIVE)).log10(),
             target_fpr: 0.01,
             method: modelsentry_common::constants::method::PER_PROMPT_CONFORMAL.to_string(),
             per_prompt: Vec::new(),
@@ -206,6 +319,11 @@ mod tests {
             interpretation: String::new(),
             computed_at: Utc::now(),
         }
+    }
+
+    /// Empty fire-history: every rule is treated as never having fired.
+    fn no_history() -> HashMap<AlertRuleId, chrono::DateTime<Utc>> {
+        HashMap::new()
     }
 
     fn make_rule(target_fpr: f32, active: bool) -> AlertRule {
@@ -222,7 +340,7 @@ mod tests {
     async fn no_rules_returns_empty_events() {
         let engine = AlertEngine::default();
         let report = make_report(0.001);
-        let events = engine.evaluate_and_fire(&report, &[]).await;
+        let events = engine.evaluate_and_fire(&report, &[], &no_history()).await;
         assert!(events.is_empty());
     }
 
@@ -231,7 +349,9 @@ mod tests {
         let engine = AlertEngine::default();
         let report = make_report(0.0001); // very significant
         let rule = make_rule(0.01, false);
-        let events = engine.evaluate_and_fire(&report, &[rule]).await;
+        let events = engine
+            .evaluate_and_fire(&report, &[rule], &no_history())
+            .await;
         assert!(events.is_empty());
     }
 
@@ -240,7 +360,9 @@ mod tests {
         let engine = AlertEngine::default();
         let report = make_report(0.001); // p < target_fpr
         let rule = make_rule(0.01, true);
-        let events = engine.evaluate_and_fire(&report, &[rule]).await;
+        let events = engine
+            .evaluate_and_fire(&report, &[rule], &no_history())
+            .await;
         assert_eq!(events.len(), 1);
         assert!(!events[0].acknowledged);
     }
@@ -250,7 +372,9 @@ mod tests {
         let engine = AlertEngine::default();
         let report = make_report(0.4); // not significant
         let rule = make_rule(0.01, true);
-        let events = engine.evaluate_and_fire(&report, &[rule]).await;
+        let events = engine
+            .evaluate_and_fire(&report, &[rule], &no_history())
+            .await;
         assert!(events.is_empty());
     }
 
@@ -260,7 +384,9 @@ mod tests {
         let report = make_report(0.0005);
         let rule = make_rule(0.01, true);
         let rule_id = rule.id.clone();
-        let events = engine.evaluate_and_fire(&report, &[rule]).await;
+        let events = engine
+            .evaluate_and_fire(&report, &[rule], &no_history())
+            .await;
         assert_eq!(events[0].rule_id, rule_id);
     }
 
@@ -290,8 +416,60 @@ mod tests {
             channels: vec![AlertChannel::Webhook { url }],
             active: true,
         };
-        engine.evaluate_and_fire(&report, &[rule]).await;
+        engine
+            .evaluate_and_fire(&report, &[rule], &no_history())
+            .await;
         // wiremock verifies the expectation on drop
+    }
+
+    // ── Cooldown / de-duplication ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cooldown_suppresses_a_recently_fired_rule() {
+        let engine = AlertEngine::default().with_cooldown(Duration::hours(1));
+        let report = make_report(0.0001); // significant → would fire
+        let rule = make_rule(0.01, true);
+        // The rule fired one minute ago — inside the 1-hour window.
+        let mut last_fired = HashMap::new();
+        last_fired.insert(rule.id.clone(), Utc::now() - Duration::minutes(1));
+        let events = engine
+            .evaluate_and_fire(&report, &[rule], &last_fired)
+            .await;
+        assert!(
+            events.is_empty(),
+            "alert should be de-duplicated within cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn cooldown_allows_a_rule_whose_window_has_elapsed() {
+        let engine = AlertEngine::default().with_cooldown(Duration::hours(1));
+        let report = make_report(0.0001);
+        let rule = make_rule(0.01, true);
+        // Last fire was two hours ago — outside the 1-hour window.
+        let mut last_fired = HashMap::new();
+        last_fired.insert(rule.id.clone(), Utc::now() - Duration::hours(2));
+        let events = engine
+            .evaluate_and_fire(&report, &[rule], &last_fired)
+            .await;
+        assert_eq!(
+            events.len(),
+            1,
+            "alert should fire once the cooldown elapsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_cooldown_never_suppresses() {
+        let engine = AlertEngine::default(); // cooldown disabled (zero)
+        let report = make_report(0.0001);
+        let rule = make_rule(0.01, true);
+        let mut last_fired = HashMap::new();
+        last_fired.insert(rule.id.clone(), Utc::now()); // fired "just now"
+        let events = engine
+            .evaluate_and_fire(&report, &[rule], &last_fired)
+            .await;
+        assert_eq!(events.len(), 1, "disabled cooldown must not suppress");
     }
 
     // ── SSRF guard ────────────────────────────────────────────────────────────
@@ -402,7 +580,9 @@ mod tests {
             active: true,
         };
         // Event is still produced (drift happened); only delivery is suppressed.
-        let events = engine.evaluate_and_fire(&report, &[rule]).await;
+        let events = engine
+            .evaluate_and_fire(&report, &[rule], &no_history())
+            .await;
         assert_eq!(events.len(), 1);
         // wiremock asserts .expect(0) on drop.
     }

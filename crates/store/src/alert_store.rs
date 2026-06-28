@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use uuid::Uuid;
 
@@ -113,6 +114,27 @@ impl AlertRuleStore {
         Ok(events.into_iter().take(limit).collect())
     }
 
+    /// Most recent `fired_at` timestamp for `rule_id`, or `None` if the rule has
+    /// never fired. Drives alert cooldown / de-duplication: the engine suppresses
+    /// a new notification while `now − last_fired < cooldown`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on transaction errors.
+    pub fn last_fired_for_rule(&self, rule_id: &AlertRuleId) -> Result<Option<DateTime<Utc>>> {
+        let read_txn = self.db.begin_read()?;
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(EVENTS_TABLE)?;
+        let mut latest: Option<DateTime<Utc>> = None;
+        for entry in table.iter()? {
+            let (_, v) = entry?;
+            let event: AlertEvent = serde_json::from_slice(v.value())?;
+            if &event.rule_id == rule_id {
+                latest = Some(latest.map_or(event.fired_at, |cur| cur.max(event.fired_at)));
+            }
+        }
+        Ok(latest)
+    }
+
     /// Mark an alert event as acknowledged. Returns `false` if the event is not found.
     ///
     /// # Errors
@@ -186,6 +208,7 @@ mod tests {
                 baseline_id: BaselineId::new(),
                 combined_p_value: 0.001,
                 statistic: 3.0,
+                effect_size: 4.0,
                 target_fpr: 0.01,
                 method: modelsentry_common::constants::method::PER_PROMPT_CONFORMAL.to_string(),
                 per_prompt: Vec::new(),
@@ -226,6 +249,40 @@ mod tests {
         let rules = store.alerts().get_rules_for_probe(&probe_id).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].id, rule.id);
+    }
+
+    #[test]
+    fn last_fired_for_rule_returns_most_recent_and_none_when_absent() {
+        let (_dir, store) = open_test_db();
+        let probe_id = ProbeId::new();
+        let rule = make_rule(&probe_id);
+
+        // No events yet.
+        assert!(
+            store
+                .alerts()
+                .last_fired_for_rule(&rule.id)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut older = make_event(&rule.id);
+        let mut newer = make_event(&rule.id);
+        older.fired_at = Utc::now();
+        newer.fired_at = older.fired_at + chrono::Duration::seconds(30);
+        // Insert out of order to prove it returns the max, not the last written.
+        store.alerts().insert_event(&newer).unwrap();
+        store.alerts().insert_event(&older).unwrap();
+
+        // An event for a *different* rule must not count.
+        let other_rule = make_rule(&probe_id);
+        store
+            .alerts()
+            .insert_event(&make_event(&other_rule.id))
+            .unwrap();
+
+        let last = store.alerts().last_fired_for_rule(&rule.id).unwrap();
+        assert_eq!(last, Some(newer.fired_at));
     }
 
     #[test]

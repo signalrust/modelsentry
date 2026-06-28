@@ -174,10 +174,47 @@ pub async fn run(config: &AppConfig, state: AppState) -> Result<()> {
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .map_err(|e| ModelSentryError::Config {
         message: format!("server error: {e}"),
     })
+}
+
+/// Resolve when the process receives a shutdown signal — `Ctrl+C` on every
+/// platform, or `SIGTERM` on Unix (the signal an orchestrator sends to stop a
+/// container). Drives Axum's graceful shutdown so in-flight requests finish
+/// before the listener closes. If a handler cannot be installed the future
+/// simply never resolves, leaving the server running (fail-safe).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("failed to install Ctrl+C handler: {e}");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("failed to install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    tracing::info!("shutdown signal received");
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +261,7 @@ mod tests {
             },
             scheduler: SchedulerConfig {
                 default_interval_minutes: 60,
+                max_concurrent_runs: 8,
             },
             alerts: AlertsConfig::default(),
             providers: ProvidersConfig::default(),

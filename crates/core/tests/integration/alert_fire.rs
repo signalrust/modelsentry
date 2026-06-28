@@ -20,6 +20,8 @@ fn make_report(combined_p_value: f32, level: DriftLevel) -> DriftReport {
         baseline_id: BaselineId::new(),
         combined_p_value,
         statistic: -(combined_p_value.max(f32::MIN_POSITIVE)).log10(),
+        // Fixture magnitude derived from the p-value (no standalone literal).
+        effect_size: -(combined_p_value.max(f32::MIN_POSITIVE)).log10(),
         target_fpr: 0.01,
         method: modelsentry_common::constants::method::PER_PROMPT_CONFORMAL.to_string(),
         per_prompt: Vec::new(),
@@ -61,7 +63,9 @@ async fn webhook_receives_correct_payload_on_drift_event() {
     let report = make_report(0.001, DriftLevel::High);
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
-    let events = engine.evaluate_and_fire(&report, &[rule]).await;
+    let events = engine
+        .evaluate_and_fire(&report, &[rule], &std::collections::HashMap::new())
+        .await;
 
     assert_eq!(events.len(), 1, "one alert event should have been fired");
     let event = &events[0];
@@ -92,7 +96,9 @@ async fn inactive_rule_does_not_fire_webhook() {
     let report = make_report(0.001, DriftLevel::High);
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
-    let events = engine.evaluate_and_fire(&report, &[rule]).await;
+    let events = engine
+        .evaluate_and_fire(&report, &[rule], &std::collections::HashMap::new())
+        .await;
 
     assert!(events.is_empty(), "inactive rule should produce no events");
 
@@ -118,7 +124,9 @@ async fn below_threshold_report_does_not_fire_webhook() {
     let report = make_report(0.5, DriftLevel::None);
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
-    let events = engine.evaluate_and_fire(&report, &[rule]).await;
+    let events = engine
+        .evaluate_and_fire(&report, &[rule], &std::collections::HashMap::new())
+        .await;
 
     assert!(
         events.is_empty(),
@@ -147,7 +155,9 @@ async fn webhook_payload_contains_required_fields() {
 
     let report = make_report(0.002, DriftLevel::Medium);
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
-    let events: Vec<AlertEvent> = engine.evaluate_and_fire(&report, &[rule]).await;
+    let events: Vec<AlertEvent> = engine
+        .evaluate_and_fire(&report, &[rule], &std::collections::HashMap::new())
+        .await;
 
     assert_eq!(events.len(), 1);
     let event = &events[0];

@@ -40,18 +40,12 @@
 #![allow(clippy::cast_precision_loss)]
 
 use modelsentry_common::{
+    constants::drift::{BASELINE_MIN_CLOUD_SPREAD, PERMUTATION_TOLERANCE, STD_FLOOR},
     error::{ModelSentryError, Result},
     models::DriftLevel,
 };
 
 use super::twosample::{self, Kernel, SplitMix64};
-
-/// Variance floor for per-prompt standardization, so a near-deterministic
-/// baseline cloud (temperature-0 / cached outputs) does not divide by ~0.
-const STD_FLOOR: f32 = 1e-6;
-
-/// Tolerance when counting permutation statistics `≥` the observed value.
-const PERMUTATION_TOLERANCE: f32 = 1e-6;
 
 /// A prompt with both a baseline cloud and ≥1 run sample, kept for assessment:
 /// `(prompt_index, baseline_cloud, run_samples)`.
@@ -92,6 +86,11 @@ pub struct PromptDrift {
     pub p_value: f32,
     /// Baseline cloud size used for this prompt.
     pub n_baseline: usize,
+    /// `true` when this prompt's baseline cloud has near-zero spread
+    /// (deterministic / cached outputs). Its drift signal then reflects
+    /// embedding noise rather than behaviour, so the verdict should not be
+    /// trusted until a varied baseline is captured. See [`cloud_spread`].
+    pub low_variance_baseline: bool,
 }
 
 /// Full drift verdict for a run.
@@ -103,6 +102,13 @@ pub struct DriftAssessment {
     /// Drift score = `−log₁₀(combined_p_value)`; higher ⇒ stronger evidence.
     /// Monotone in significance and consistent across both modes.
     pub statistic: f32,
+    /// Interpretable drift **magnitude** (mean standardized per-prompt excursion
+    /// in the per-prompt mode; the pooled statistic's standardized excursion in
+    /// fallback mode). Reported alongside `statistic` because `−log₁₀(p)`
+    /// conflates magnitude with precision — a large baseline can make a trivial
+    /// shift "significant". This says *how far* the outputs moved, in standard
+    /// deviations of the no-drift null. ~0 ⇒ within noise.
+    pub effect_size: f32,
     /// Severity derived from `combined_p_value` vs `target_fpr`.
     pub level: DriftLevel,
     /// Which test produced the verdict.
@@ -205,16 +211,22 @@ fn assess_per_prompt(
             prompt_index: *idx,
             p_value: score.attribution_p,
             n_baseline: cloud.len(),
+            low_variance_baseline: cloud_spread(cloud) < BASELINE_MIN_CLOUD_SPREAD,
         });
         observed += score.z_obs.max(0.0);
         strata.push(score.null_pool);
     }
 
     let combined_p_value = stratified_permutation_p(&strata, observed, n_perm, config.seed);
+    // Magnitude: the average per-prompt positive excursion (in null SDs), so it
+    // does not grow merely because more prompts were tested.
+    #[allow(clippy::cast_precision_loss)]
+    let effect_size = observed / usable.len() as f32;
 
     Ok(DriftAssessment {
         combined_p_value,
         statistic: drift_score(combined_p_value),
+        effect_size,
         level: severity_from_p(combined_p_value, config.target_fpr),
         method: METHOD_PER_PROMPT,
         per_prompt,
@@ -268,14 +280,27 @@ fn prompt_score(
 }
 
 /// Mean and standard deviation (variance floored by [`STD_FLOOR`]) of a slice.
+/// Accumulated in `f64` for precision, reported as `f32`.
 fn mean_std(xs: &[f32]) -> (f32, f32) {
-    let n = xs.len() as f32;
-    if n == 0.0 {
+    let n = xs.len();
+    if n == 0 {
         return (0.0, STD_FLOOR);
     }
-    let mean = xs.iter().sum::<f32>() / n;
-    let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / n;
-    (mean, var.sqrt().max(STD_FLOOR))
+    #[allow(clippy::cast_precision_loss)]
+    let count = n as f64;
+    let mean = xs.iter().map(|&x| f64::from(x)).sum::<f64>() / count;
+    let var = xs
+        .iter()
+        .map(|&x| {
+            let d = f64::from(x) - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / count;
+    let sd = var.sqrt().max(f64::from(STD_FLOOR));
+    #[allow(clippy::cast_possible_truncation)]
+    let out = (mean as f32, sd as f32);
+    out
 }
 
 /// Stratified permutation p-value of the aggregate statistic `T = Σ max(zᵢ, 0)`.
@@ -354,14 +379,30 @@ fn conformal_from_scores(scores: &[f32]) -> f32 {
 /// prompts with different output-distance scales are comparable. The variance is
 /// floored ([`STD_FLOOR`]) for near-deterministic baselines.
 fn standardize(scores: &[f32]) -> Vec<f32> {
-    let n = scores.len() as f32;
-    if n == 0.0 {
+    let n = scores.len();
+    if n == 0 {
         return Vec::new();
     }
-    let mean = scores.iter().sum::<f32>() / n;
-    let var = scores.iter().map(|s| (s - mean) * (s - mean)).sum::<f32>() / n;
-    let sd = var.sqrt().max(STD_FLOOR);
-    scores.iter().map(|s| (s - mean) / sd).collect()
+    #[allow(clippy::cast_precision_loss)]
+    let count = n as f64;
+    let mean = scores.iter().map(|&s| f64::from(s)).sum::<f64>() / count;
+    let var = scores
+        .iter()
+        .map(|&s| {
+            let d = f64::from(s) - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / count;
+    let sd = var.sqrt().max(f64::from(STD_FLOOR));
+    scores
+        .iter()
+        .map(|&s| {
+            #[allow(clippy::cast_possible_truncation)]
+            let z = ((f64::from(s) - mean) / sd) as f32;
+            z
+        })
+        .collect()
 }
 
 /// Pooled MMD/energy fallback (single-sample baselines).
@@ -389,6 +430,7 @@ fn assess_pooled(
     Ok(DriftAssessment {
         combined_p_value: outcome.p_value,
         statistic: drift_score(outcome.p_value),
+        effect_size: outcome.effect_size,
         level: severity_from_p(outcome.p_value, config.target_fpr),
         method: METHOD_POOLED,
         per_prompt: Vec::new(),
@@ -418,13 +460,58 @@ fn severity_from_p(p: f32, target_fpr: f32) -> DriftLevel {
     }
 }
 
-/// Euclidean distance between two equal-length vectors.
+/// Euclidean distance between two equal-length vectors. Accumulated in `f64`
+/// (the vectors are high-dimensional) and reported as `f32`.
 fn euclidean(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
+    let sum: f64 = a
+        .iter()
         .zip(b.iter())
-        .map(|(x, y)| (x - y) * (x - y))
-        .sum::<f32>()
-        .sqrt()
+        .map(|(x, y)| {
+            let d = f64::from(*x) - f64::from(*y);
+            d * d
+        })
+        .sum();
+    #[allow(clippy::cast_possible_truncation)]
+    let dist = sum.sqrt() as f32;
+    dist
+}
+
+/// RMS distance of a baseline cloud's points to their centroid — the cloud's
+/// "radius". Near-zero means the baseline outputs are effectively identical
+/// (deterministic / cached / temperature-0), so any drift signal for that prompt
+/// reflects embedding noise, not behaviour. Returns 0 for a cloud of fewer than
+/// two points. Accumulated in `f64`.
+fn cloud_spread(cloud: &[Vec<f32>]) -> f32 {
+    let k = cloud.len();
+    let dim = cloud.first().map_or(0, Vec::len);
+    if k < 2 || dim == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let count = k as f64;
+
+    let mut centroid = vec![0.0_f64; dim];
+    for point in cloud {
+        for (c, &x) in centroid.iter_mut().zip(point.iter()) {
+            *c += f64::from(x);
+        }
+    }
+    for c in &mut centroid {
+        *c /= count;
+    }
+
+    let mut sum_sq = 0.0_f64;
+    for point in cloud {
+        let mut d2 = 0.0_f64;
+        for (&x, c) in point.iter().zip(centroid.iter()) {
+            let diff = f64::from(x) - c;
+            d2 += diff * diff;
+        }
+        sum_sq += d2;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let spread = (sum_sq / count).sqrt() as f32;
+    spread
 }
 
 /// Validate that a cloud and all run samples share one dimension.
@@ -518,6 +605,37 @@ mod tests {
             out.combined_p_value
         );
         assert_eq!(out.level, DriftLevel::None);
+    }
+
+    #[test]
+    fn flags_low_variance_baseline_prompt() {
+        let dim = 4;
+        // Prompt 0 has a real spread; prompt 1's baseline is identical points
+        // (deterministic/cached outputs) and must be flagged as low-variance.
+        let varied = cloud(20, dim, 0.0, 0.1);
+        let identical = vec![point(dim, 5.0); 20];
+        let baseline = vec![varied, identical];
+        let run = vec![one(point(dim, 0.0)), one(point(dim, 5.0))];
+        let out = assess(&baseline, &run, &AssessmentConfig::default()).unwrap();
+        assert_eq!(out.method, METHOD_PER_PROMPT);
+        let p0 = out
+            .per_prompt
+            .iter()
+            .find(|p| p.prompt_index == 0)
+            .expect("prompt 0");
+        let p1 = out
+            .per_prompt
+            .iter()
+            .find(|p| p.prompt_index == 1)
+            .expect("prompt 1");
+        assert!(
+            !p0.low_variance_baseline,
+            "varied baseline must not be flagged"
+        );
+        assert!(
+            p1.low_variance_baseline,
+            "deterministic baseline must be flagged"
+        );
     }
 
     #[test]

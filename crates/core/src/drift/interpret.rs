@@ -19,10 +19,28 @@ pub fn interpret(assessment: &DriftAssessment, target_fpr: f32) -> String {
     };
     let p = assessment.combined_p_value;
 
+    // Honesty caveat: a near-constant baseline measures embedding noise, not
+    // behaviour. Surface it whether or not the run "drifted".
+    let degenerate: Vec<usize> = assessment
+        .per_prompt
+        .iter()
+        .filter(|pp| pp.low_variance_baseline)
+        .map(|pp| pp.prompt_index)
+        .collect();
+    let health_note = if degenerate.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " ⚠ Baseline health: prompt(s) {degenerate:?} have a near-constant baseline \
+             (deterministic or cached outputs), so their signal reflects embedding noise, not \
+             behaviour — re-capture a varied baseline before trusting it."
+        )
+    };
+
     if assessment.level == DriftLevel::None {
         return format!(
             "No drift detected: the run's outputs are statistically consistent with the baseline \
-             ({method} test, combined p = {p:.4} ≥ target FPR {target_fpr:.4})."
+             ({method} test, combined p = {p:.4} ≥ target FPR {target_fpr:.4}).{health_note}"
         );
     }
 
@@ -53,7 +71,9 @@ pub fn interpret(assessment: &DriftAssessment, target_fpr: f32) -> String {
 
     format!(
         "{lead}: the {method} test rejects the no-drift hypothesis (combined p = {p:.4} < target \
-         FPR {target_fpr:.4}), so the model's outputs have shifted relative to the baseline.{strongest}"
+         FPR {target_fpr:.4}, magnitude {effect:.1} SD), so the model's outputs have shifted \
+         relative to the baseline.{strongest}{health_note}",
+        effect = assessment.effect_size
     )
 }
 
@@ -68,12 +88,14 @@ mod tests {
         DriftAssessment {
             combined_p_value: p,
             statistic: -(p.max(f32::MIN_POSITIVE)).log10(),
+            effect_size: 3.5,
             level,
             method,
             per_prompt: vec![PromptDrift {
                 prompt_index: 2,
                 p_value: p,
                 n_baseline: 40,
+                low_variance_baseline: false,
             }],
         }
     }
@@ -94,6 +116,14 @@ mod tests {
         assert!(text.contains("High drift"), "{text}");
         assert!(text.contains("per-prompt conformal"), "{text}");
         assert!(text.contains("prompt #2"), "{text}");
+    }
+
+    #[test]
+    fn flags_low_variance_baseline_in_text() {
+        let mut a = assessment(DriftLevel::None, 0.4, METHOD_PER_PROMPT);
+        a.per_prompt[0].low_variance_baseline = true;
+        let text = interpret(&a, 0.01);
+        assert!(text.contains("Baseline health"), "{text}");
     }
 
     #[test]

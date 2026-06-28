@@ -20,7 +20,7 @@ use modelsentry_core::drift::calculator::DriftCalculator;
 use modelsentry_core::probe_runner::ProbeRunner;
 use modelsentry_core::provider::DynProvider;
 use modelsentry_store::AppStore;
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::constants::runtime::{PROBE_CONCURRENCY, RECONCILE_INTERVAL};
@@ -40,6 +40,9 @@ pub struct Scheduler {
     alert_engine: Arc<AlertEngine>,
     /// Completions sampled per prompt per run (drift resolution vs. cost).
     samples_per_prompt: usize,
+    /// Caps probe runs in flight across all probes, so a fleet (or a restart
+    /// that finds several probes overdue) cannot stampede a provider.
+    run_semaphore: Arc<Semaphore>,
 }
 
 /// Handle returned by [`Scheduler::start`].
@@ -53,6 +56,9 @@ pub struct SchedulerHandle {
 
 impl Scheduler {
     /// Create a new scheduler with the given components.
+    ///
+    /// `max_concurrent_runs` bounds probe runs in flight across all probes
+    /// (clamped to a minimum of 1).
     #[must_use]
     pub fn new(
         store: Arc<AppStore>,
@@ -60,6 +66,7 @@ impl Scheduler {
         calculator: Arc<DriftCalculator>,
         alert_engine: Arc<AlertEngine>,
         samples_per_prompt: usize,
+        max_concurrent_runs: usize,
     ) -> Self {
         Self {
             store,
@@ -67,6 +74,7 @@ impl Scheduler {
             calculator,
             alert_engine,
             samples_per_prompt,
+            run_semaphore: Arc::new(Semaphore::new(max_concurrent_runs.max(1))),
         }
     }
 
@@ -85,6 +93,7 @@ impl Scheduler {
         let calculator = Arc::clone(&self.calculator);
         let alert_engine = Arc::clone(&self.alert_engine);
         let samples_per_prompt = self.samples_per_prompt;
+        let run_semaphore = Arc::clone(&self.run_semaphore);
 
         let join_handle = tokio::spawn(async move {
             // Currently-scheduled probe loops, keyed by probe id.
@@ -107,6 +116,7 @@ impl Scheduler {
                             &calculator,
                             &alert_engine,
                             samples_per_prompt,
+                            &run_semaphore,
                             &mut active,
                         );
                     }
@@ -139,6 +149,7 @@ fn reconcile(
     calculator: &Arc<DriftCalculator>,
     alert_engine: &Arc<AlertEngine>,
     samples_per_prompt: usize,
+    run_semaphore: &Arc<Semaphore>,
     active: &mut HashMap<ProbeId, ActiveProbe>,
 ) {
     let probes = match store.probes().list_all() {
@@ -172,6 +183,11 @@ fn reconcile(
         }
         if let Some(old) = active.remove(&probe.id) {
             old.handle.abort();
+            // The schedule may have changed; drop the persisted next-run so the
+            // new schedule takes effect now instead of after the pending run.
+            if let Err(e) = store.schedule().delete(&probe.id) {
+                tracing::warn!(probe_id = %probe.id, "scheduler: could not reset schedule state: {e}");
+            }
             tracing::info!(probe_id = %probe.id, "scheduler: probe changed — rescheduling");
         } else {
             tracing::info!(probe_id = %probe.id, "scheduler: probe added — scheduling");
@@ -185,6 +201,7 @@ fn reconcile(
             Arc::clone(calculator),
             Arc::clone(alert_engine),
             samples_per_prompt,
+            Arc::clone(run_semaphore),
         ));
         active.insert(id, ActiveProbe { updated_at, handle });
     }
@@ -210,9 +227,16 @@ async fn run_probe_loop(
     calculator: Arc<DriftCalculator>,
     alert_engine: Arc<AlertEngine>,
     samples_per_prompt: usize,
+    run_semaphore: Arc<Semaphore>,
 ) {
     loop {
-        tokio::time::sleep(sleep_until_next_run(&probe.schedule)).await;
+        // Sleep until this probe's persisted next-run time. On a fresh start
+        // this is "one interval from now"; after a restart it is the time stored
+        // before shutdown — already in the past for an overdue probe, so the
+        // sleep is zero and the missed run fires immediately (single catch-up).
+        let next_at = scheduled_next_run(&store, &probe);
+        let wait = (next_at - Utc::now()).to_std().unwrap_or(Duration::ZERO);
+        tokio::time::sleep(wait).await;
 
         // Resolve the provider fresh each run so vault/config changes apply
         // without a restart, and a misconfigured probe never aborts the loop.
@@ -223,22 +247,73 @@ async fn run_probe_loop(
                     probe_id = %probe.id,
                     "scheduler: cannot build provider for probe — skipping run: {e}",
                 );
+                // Advance the schedule so a persistently-bad provider does not
+                // hot-loop on an already-due next-run time.
+                advance_schedule(&store, &probe);
                 continue;
             }
         };
 
-        if let Err(e) = run_probe_job(
-            &probe,
-            &store,
-            provider,
-            &calculator,
-            &alert_engine,
-            samples_per_prompt,
-        )
-        .await
+        // Bound the number of probe runs in flight across all probes. The permit
+        // is held only for the duration of the run (released at the block end). A
+        // closed semaphore means the scheduler is shutting down, so exit.
         {
-            tracing::error!(probe_id = %probe.id, "scheduler: probe run failed: {e}");
+            let Ok(_permit) = run_semaphore.clone().acquire_owned().await else {
+                return;
+            };
+            if let Err(e) = run_probe_job(
+                &probe,
+                &store,
+                provider,
+                &calculator,
+                &alert_engine,
+                samples_per_prompt,
+            )
+            .await
+            {
+                tracing::error!(probe_id = %probe.id, "scheduler: probe run failed: {e}");
+            }
         }
+
+        advance_schedule(&store, &probe);
+    }
+}
+
+/// Read the probe's next scheduled run from the store, initializing and
+/// persisting it for a brand-new probe (no stored state). Falls back to a fresh
+/// interval if the state cannot be read.
+fn scheduled_next_run(store: &AppStore, probe: &Probe) -> DateTime<Utc> {
+    match store.schedule().get_next_run(&probe.id) {
+        Ok(Some(next_at)) => next_at,
+        Ok(None) => {
+            let next_at = next_run_after(&probe.schedule, Utc::now());
+            advance_schedule_to(store, &probe.id, next_at);
+            next_at
+        }
+        Err(e) => {
+            tracing::warn!(
+                probe_id = %probe.id,
+                "scheduler: cannot read schedule state, falling back to interval: {e}",
+            );
+            next_run_after(&probe.schedule, Utc::now())
+        }
+    }
+}
+
+/// Persist the *following* run time (one schedule step after now) for `probe`.
+fn advance_schedule(store: &AppStore, probe: &Probe) {
+    advance_schedule_to(
+        store,
+        &probe.id,
+        next_run_after(&probe.schedule, Utc::now()),
+    );
+}
+
+/// Persist `next_at` as `probe_id`'s next-run time, logging on failure (a failed
+/// write only loses restart-resume precision for this probe, never a run).
+fn advance_schedule_to(store: &AppStore, probe_id: &ProbeId, next_at: DateTime<Utc>) {
+    if let Err(e) = store.schedule().set_next_run(probe_id, next_at) {
+        tracing::warn!(probe_id = %probe_id, "scheduler: failed to persist next-run time: {e}");
     }
 }
 
@@ -271,7 +346,17 @@ async fn run_probe_job(
             match calculator.compute(&run, &baseline) {
                 Ok(report) => {
                     let rules = store.alerts().get_rules_for_probe(&probe.id)?;
-                    let events = alert_engine.evaluate_and_fire(&report, &rules).await;
+                    // Load each rule's last-fired time so the engine can apply
+                    // the cooldown / de-duplication window.
+                    let mut last_fired = HashMap::new();
+                    for rule in &rules {
+                        if let Some(at) = store.alerts().last_fired_for_rule(&rule.id)? {
+                            last_fired.insert(rule.id.clone(), at);
+                        }
+                    }
+                    let events = alert_engine
+                        .evaluate_and_fire(&report, &rules, &last_fired)
+                        .await;
                     for event in &events {
                         store.alerts().insert_event(event)?;
                     }
@@ -339,26 +424,29 @@ pub fn validate_schedule(schedule: &ProbeSchedule) -> std::result::Result<(), St
     }
 }
 
-fn sleep_until_next_run(schedule: &ProbeSchedule) -> Duration {
+/// The next absolute run time for `schedule`, computed relative to `from`.
+///
+/// For `EveryMinutes` this is `from + minutes` (a 0-minute schedule that slipped
+/// past validation is floored to 1 minute, never a busy loop). For `Cron` it is
+/// the next firing strictly after `from`; an unparseable expression that somehow
+/// reached the scheduler falls back to one hour out.
+fn next_run_after(schedule: &ProbeSchedule, from: DateTime<Utc>) -> DateTime<Utc> {
     match schedule {
         ProbeSchedule::EveryMinutes { minutes } => {
-            // Guard against a 0-minute schedule slipping past validation
-            // (e.g. a probe stored before this check existed) → no busy loop.
-            Duration::from_secs(u64::from((*minutes).max(1)) * 60)
+            from + chrono::Duration::minutes(i64::from((*minutes).max(1)))
         }
         ProbeSchedule::Cron { expression } => match parse_cron_schedule(expression) {
             Ok(sched) => sched
-                .upcoming(Utc)
+                .after(&from)
                 .next()
-                .and_then(|t| (t - Utc::now()).to_std().ok())
-                .unwrap_or(Duration::from_secs(1)),
+                .unwrap_or_else(|| from + chrono::Duration::hours(1)),
             Err(e) => {
                 tracing::warn!(
                     expr = expression,
                     "{e}; falling back to 1-hour interval (this probe should have been \
                      rejected at create time)"
                 );
-                Duration::from_secs(60 * 60)
+                from + chrono::Duration::hours(1)
             }
         },
     }
@@ -506,6 +594,7 @@ mod tests {
             Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             Arc::new(AlertEngine::default()),
             1,
+            4,
         )
     }
 
@@ -580,6 +669,7 @@ mod tests {
             Arc::new(DriftCalculator::new(AssessmentConfig::default())),
             Arc::new(AlertEngine::default()),
             1,
+            4,
         )
         .start();
 
@@ -697,41 +787,51 @@ mod tests {
         handle.shutdown().await;
     }
 
-    // --- cron schedule unit tests ---
+    // --- schedule next-run unit tests ---
 
     #[test]
-    fn every_minutes_gives_exact_duration() {
+    fn every_minutes_gives_exact_next_time() {
+        let from = Utc::now();
         let s = ProbeSchedule::EveryMinutes { minutes: 15 };
-        assert_eq!(sleep_until_next_run(&s), Duration::from_secs(15 * 60));
+        assert_eq!(
+            next_run_after(&s, from),
+            from + chrono::Duration::minutes(15)
+        );
     }
 
     #[test]
-    fn valid_cron_gives_positive_duration_under_one_period() {
-        // "every minute" — next tick is ≤60 s away
+    fn valid_cron_next_is_within_one_period() {
+        // "every minute" — next firing is strictly after `from` and ≤60 s away.
+        let from = Utc::now();
         let s = ProbeSchedule::Cron {
             expression: "* * * * *".to_string(),
         };
-        let dur = sleep_until_next_run(&s);
+        let next = next_run_after(&s, from);
         assert!(
-            dur <= Duration::from_secs(60),
-            "expected ≤60 s, got {dur:?}"
+            next > from && next <= from + chrono::Duration::seconds(60),
+            "expected next within 60 s, got {next}"
         );
     }
 
     #[test]
     fn invalid_cron_falls_back_to_hourly() {
+        let from = Utc::now();
         let s = ProbeSchedule::Cron {
             expression: "not-a-cron-expr".to_string(),
         };
-        assert_eq!(sleep_until_next_run(&s), Duration::from_secs(60 * 60));
+        assert_eq!(next_run_after(&s, from), from + chrono::Duration::hours(1));
     }
 
     #[test]
     fn zero_minutes_schedule_does_not_busy_loop() {
-        // Defensive: a 0-minute probe that slipped past validation must still
-        // yield a non-zero sleep, not a tight loop.
+        // Defensive: a 0-minute probe that slipped past validation is floored to
+        // a 1-minute step, never an already-past (busy-looping) next-run time.
+        let from = Utc::now();
         let s = ProbeSchedule::EveryMinutes { minutes: 0 };
-        assert_eq!(sleep_until_next_run(&s), Duration::from_secs(60));
+        assert_eq!(
+            next_run_after(&s, from),
+            from + chrono::Duration::minutes(1)
+        );
     }
 
     #[test]
@@ -762,13 +862,47 @@ mod tests {
     #[test]
     fn six_field_cron_is_parsed_directly() {
         // 6-field: sec min hour dom month dow — "every minute at second 0"
+        let from = Utc::now();
         let s = ProbeSchedule::Cron {
             expression: "0 * * * * *".to_string(),
         };
-        let dur = sleep_until_next_run(&s);
+        let next = next_run_after(&s, from);
         assert!(
-            dur <= Duration::from_secs(60),
-            "expected ≤60 s, got {dur:?}"
+            next > from && next <= from + chrono::Duration::seconds(60),
+            "expected next within 60 s, got {next}"
         );
+    }
+
+    /// Restart durability: a probe whose persisted next-run is already in the
+    /// past must run immediately on start (a single catch-up), without waiting a
+    /// full interval — proven here by advancing **no** virtual time.
+    #[tokio::test(start_paused = true)]
+    async fn overdue_probe_runs_immediately_via_persisted_schedule() {
+        let (_dir, store) = open_store();
+        let probe = make_probe(60); // hourly — would otherwise wait an hour
+        let probe_id = probe.id.clone();
+        store.probes().insert(&probe).unwrap();
+        // Simulate a prior run that scheduled the next one for 10 minutes ago
+        // (i.e. the daemon was down across it).
+        store
+            .schedule()
+            .set_next_run(&probe_id, Utc::now() - chrono::Duration::minutes(10))
+            .unwrap();
+
+        let handle = make_scheduler(Arc::clone(&store), Arc::new(OkProvider)).start();
+
+        // No time advance — only yields. The overdue probe must fire on a
+        // zero-length sleep rather than waiting its hourly interval.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        let runs = store.runs().list_for_probe(&probe_id, 10).unwrap();
+        assert!(
+            !runs.is_empty(),
+            "overdue probe should run immediately on start (restart catch-up)"
+        );
+
+        handle.shutdown().await;
     }
 }

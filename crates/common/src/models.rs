@@ -195,6 +195,13 @@ pub struct DriftReport {
     pub combined_p_value: f32,
     /// Drift score `−log₁₀(combined_p_value)`; higher ⇒ stronger evidence.
     pub statistic: f32,
+    /// Interpretable drift **magnitude**: how far the run's outputs moved, in
+    /// standard deviations of the no-drift null. Unlike `statistic` (`−log₁₀ p`,
+    /// which a large baseline can inflate for a trivial shift), this separates
+    /// effect *size* from statistical *precision*. ~0 ⇒ within noise. Defaulted
+    /// for reports persisted before this field existed.
+    #[serde(default)]
+    pub effect_size: f32,
     /// Target false-positive rate this report was judged against.
     pub target_fpr: f32,
     /// Test that produced the verdict (`per_prompt_conformal` / `pooled_two_sample`).
@@ -215,6 +222,11 @@ pub struct PromptDrift {
     pub prompt_index: usize,
     pub p_value: f32,
     pub n_baseline: usize,
+    /// `true` when this prompt's baseline cloud is near-constant
+    /// (deterministic/cached outputs), so its drift signal measures embedding
+    /// noise rather than behaviour. Defaulted for reports predating this field.
+    #[serde(default)]
+    pub low_variance_baseline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -395,6 +407,7 @@ mod tests {
                 baseline_id: BaselineId::new(),
                 combined_p_value: 0.002,
                 statistic: 2.7,
+                effect_size: 3.1,
                 target_fpr: 0.01,
                 method: crate::constants::method::PER_PROMPT_CONFORMAL.to_string(),
                 per_prompt: Vec::new(),

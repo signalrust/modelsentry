@@ -52,6 +52,10 @@
       <span class="metric-value">{report.statistic.toFixed(2)}</span>
     </div>
     <div class="metric-header">
+      <span class="metric-label" title="Effect size: how far outputs moved, in standard deviations of the no-drift null (independent of baseline size).">Magnitude</span>
+      <span class="metric-value">{report.effect_size.toFixed(1)} SD</span>
+    </div>
+    <div class="metric-header">
       <span class="metric-label">Method</span>
       <span class="metric-value method">{methodLabel}</span>
     </div>

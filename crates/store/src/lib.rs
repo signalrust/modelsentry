@@ -14,11 +14,13 @@ pub mod alert_store;
 pub mod baseline_store;
 pub mod probe_store;
 pub mod run_store;
+pub mod schedule_store;
 
 pub use alert_store::AlertRuleStore;
 pub use baseline_store::BaselineStore;
 pub use probe_store::ProbeStore;
 pub use run_store::RunStore;
+pub use schedule_store::ScheduleStore;
 
 use std::{path::Path, sync::Arc};
 
@@ -34,6 +36,8 @@ const BASELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table
 const RUNS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::RUNS);
 const ALERT_RULES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::ALERT_RULES);
 const ALERT_EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::ALERT_EVENTS);
+const SCHEDULE_STATE_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(table::SCHEDULE_STATE);
 
 /// Combined handle to all store modules.
 ///
@@ -81,6 +85,12 @@ impl AppStore {
         AlertRuleStore::new(Arc::clone(&self.db))
     }
 
+    /// Return a [`ScheduleStore`] backed by this database.
+    #[must_use]
+    pub fn schedule(&self) -> ScheduleStore {
+        ScheduleStore::new(Arc::clone(&self.db))
+    }
+
     /// Delete a probe and all its associated runs and baselines atomically.
     ///
     /// Returns `false` if the probe was not found (no partial work is done).
@@ -95,6 +105,7 @@ impl AppStore {
         }
         self.runs().delete_for_probe(id)?;
         self.baselines().delete_for_probe(id)?;
+        self.schedule().delete(id)?;
         Ok(true)
     }
 
@@ -107,6 +118,7 @@ impl AppStore {
         write_txn.open_table(RUNS_TABLE)?;
         write_txn.open_table(ALERT_RULES_TABLE)?;
         write_txn.open_table(ALERT_EVENTS_TABLE)?;
+        write_txn.open_table(SCHEDULE_STATE_TABLE)?;
         write_txn.commit()?;
         Ok(())
     }

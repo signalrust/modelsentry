@@ -22,6 +22,12 @@ path = ".modelsentry/store.redb"
 [scheduler]
 # Default polling interval for probes that use EveryMinutes schedule.
 default_interval_minutes = 60
+# Maximum probe runs executing at once across ALL probes. Each run may itself
+# fan out several prompts, so this bounds total outbound load on a provider and
+# stops a fleet of probes (or a restart that finds several overdue) from
+# stampeding it. Must be >= 1. Next-run times are persisted, so on restart an
+# overdue probe runs once to catch up, then resumes its normal cadence.
+max_concurrent_runs = 8
 
 [alerts]
 # Drift detection is a calibrated statistical test (see
@@ -53,6 +59,24 @@ permutations = 200
 # 1/(k+1) for a single drifted prompt (it resolves to 1/(permutations+1)). Set
 # to 1 to halve/third the provider-call cost at the price of that resolution.
 samples_per_prompt = 3
+# Per-rule alert de-duplication / cooldown window, in seconds. target_fpr is a
+# PER-RUN rate, so without a cooldown a persistently-drifted or chronically-noisy
+# probe would re-alert on every scheduled run. Within this window a rule that
+# keeps firing is de-duplicated: the run is still recorded, but no new
+# notification is sent. Default 3600 (one hour). Set 0 to disable.
+cooldown_secs = 3600
+
+# --------------------------------------------------------------------------
+# Email alert channel (SMTP). Optional — omit this whole block to log-and-skip
+# email alerts. The password is stored in the encrypted vault under the 'smtp'
+# key (e.g. `modelsentry vault set smtp`), never in this file.
+# --------------------------------------------------------------------------
+# [alerts.smtp]
+# host = "smtp.example.com"
+# port = 587                       # 587 = STARTTLS submission, 465 = implicit TLS
+# from = "ModelSentry <alerts@example.com>"
+# username = "alerts@example.com"  # omit (with no vault password) for an open relay
+# security = "start_tls"           # "start_tls" (default) | "tls" | "none"
 
 # --------------------------------------------------------------------------
 # Provider defaults — override model names, base URLs, and token limits.

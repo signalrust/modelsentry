@@ -8,6 +8,33 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ### Added
 
+- **Scheduler restart durability (catch-up).** Each probe's next-run time is now
+  persisted (`schedule_state` redb table), so a restart resumes every probe's
+  cadence instead of re-phasing it to "one interval from process start". A probe
+  found overdue runs once immediately (single catch-up), then resumes normally.
+- **Fleet-wide run concurrency cap.** `[scheduler] max_concurrent_runs` (default
+  8) bounds probe runs executing at once across all probes via a shared
+  semaphore, so a fleet — or a restart that finds several probes overdue — cannot
+  stampede a provider.
+- **Graceful shutdown.** The daemon now traps Ctrl+C / SIGTERM, drains in-flight
+  HTTP requests, then stops the scheduler so probe loops abort cleanly (no
+  half-written redb transaction on a hard kill).
+- **Email alert channel (SMTP).** `AlertChannel::Email` now delivers over SMTP
+  via `lettre` (rustls TLS) instead of logging a stub. Configure `[alerts.smtp]`
+  (host, port, from, optional username, `security = start_tls | tls | none`); the
+  password is read from the vault under the `smtp` key. The mailer is built once
+  at startup — a misconfigured block disables email (logged) without aborting the
+  daemon. (`crates/core/src/email.rs`, `crates/core/src/alert.rs`)
+- **Alert cooldown / de-duplication (sequential control).** `[alerts]
+  cooldown_secs` (default 3600) bounds repeat notifications: a rule that keeps
+  firing within its window is de-duplicated — the run is still recorded, but no
+  new notification/event is emitted. Closes the gap where the per-run `target_fpr`
+  multiplied into many alerts over a month of scheduled runs.
+- **Drift effect size (magnitude, not just significance).** `DriftReport` gains
+  `effect_size` — how far the run's outputs moved, in standard deviations of the
+  no-drift null — reported alongside the p-value and `−log₁₀(p)` score (which a
+  large baseline can inflate for a trivial shift). Shown in the dashboard's
+  *Latest Metrics* and in the verdict text.
 - **Per-prompt multi-sampling removes the single-prompt drift floor.** Each run
   now samples every prompt `[alerts] samples_per_prompt` times (default 3), so a
   prompt's drift is scored by a two-sample energy permutation (baseline cloud vs
@@ -22,6 +49,10 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ### Changed
 
+- **Constants consolidated into the single workspace module.** The drift-math
+  floors/tolerances (previously redeclared in `twosample.rs` and `assessment.rs`)
+  and the `[alerts]` default values now live in `modelsentry_common::constants`
+  (`drift`, `alerts`, `credential` groups), so a tuning value is defined once.
 - **Drift gate now resolves the target FPR (calibration fix).** The per-prompt
   conformal rank is hard-floored at `1/(k+1)`, so the previous Šidák-of-min gate
   could not alert at the default `target_fpr = 0.01` with `k = 20` baseline runs.

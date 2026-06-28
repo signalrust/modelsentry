@@ -181,6 +181,7 @@ mod tests {
             },
             scheduler: SchedulerConfig {
                 default_interval_minutes: 60,
+                max_concurrent_runs: 8,
             },
             alerts: AlertsConfig::default(),
             providers: ProvidersConfig::default(),
