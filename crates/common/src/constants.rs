@@ -61,12 +61,26 @@ pub mod table {
     pub const PROBES: &str = "probes";
     /// Captured baseline snapshots.
     pub const BASELINES: &str = "baselines";
-    /// Probe run results.
+    /// Probe run **metadata** (everything except the heavy embeddings): status,
+    /// timestamps, completions, drift report. Keyed by run id. The bulk
+    /// embeddings live in [`RUN_EMBEDDINGS`] so listing runs never decodes them.
     pub const RUNS: &str = "runs";
+    /// Per-run output embeddings, keyed by run id. Read only by baseline capture,
+    /// which aggregates the runs it folds into a cloud — kept out of [`RUNS`] so
+    /// a dashboard run-list does not pay to decode megabytes of vectors.
+    pub const RUN_EMBEDDINGS: &str = "run_embeddings";
+    /// Time-ordered index over runs, keyed `{probe_id}|{rev_ts}|{run_id}` so the
+    /// most-recent N runs for a probe are a bounded range scan instead of a
+    /// full-table scan.
+    pub const RUN_INDEX: &str = "run_index";
     /// Alert rules.
     pub const ALERT_RULES: &str = "alert_rules";
     /// Fired alert events.
     pub const ALERT_EVENTS: &str = "alert_events";
+    /// Per-rule most-recent fire time, maintained on each event insert so the
+    /// cooldown check (`last_fired_for_rule`, consulted every scheduled run) is
+    /// an O(1) point lookup instead of a full scan of [`ALERT_EVENTS`].
+    pub const ALERT_LAST_FIRED: &str = "alert_last_fired";
     /// Per-probe scheduler state (the next scheduled run time), so the daemon
     /// resumes each probe's cadence across restarts instead of re-phasing it.
     pub const SCHEDULE_STATE: &str = "schedule_state";

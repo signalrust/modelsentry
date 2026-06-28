@@ -16,6 +16,8 @@ const RULES_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new(modelsentry_common::constants::table::ALERT_RULES);
 const EVENTS_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new(modelsentry_common::constants::table::ALERT_EVENTS);
+const LAST_FIRED_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(modelsentry_common::constants::table::ALERT_LAST_FIRED);
 
 /// Typed CRUD for [`AlertRule`] and [`AlertEvent`] records.
 pub struct AlertRuleStore {
@@ -75,11 +77,20 @@ impl AlertRuleStore {
             let id_str = id.to_string();
             table.remove(id_str.as_str())?.is_some()
         };
+        {
+            // Drop the rule's last-fired index entry so it does not linger.
+            let mut last_fired = write_txn.open_table(LAST_FIRED_TABLE)?;
+            last_fired.remove(id.to_string().as_str())?;
+        }
         write_txn.commit()?;
         Ok(existed)
     }
 
-    /// Persist an alert event.
+    /// Persist an alert event and refresh the rule's last-fired index.
+    ///
+    /// The per-rule last-fired time is maintained here (set to the later of the
+    /// existing value and this event's `fired_at`, so out-of-order inserts are
+    /// handled) so [`Self::last_fired_for_rule`] stays an O(1) lookup.
     ///
     /// # Errors
     ///
@@ -91,6 +102,17 @@ impl AlertRuleStore {
             let mut table = write_txn.open_table(EVENTS_TABLE)?;
             let id = event.id.to_string();
             table.insert(id.as_str(), bytes.as_slice())?;
+        }
+        {
+            let mut last_fired = write_txn.open_table(LAST_FIRED_TABLE)?;
+            let rule_id = event.rule_id.to_string();
+            let prev: Option<DateTime<Utc>> = match last_fired.get(rule_id.as_str())? {
+                Some(guard) => Some(serde_json::from_slice(guard.value())?),
+                None => None,
+            };
+            let newest = prev.map_or(event.fired_at, |p| p.max(event.fired_at));
+            let value = serde_json::to_vec(&newest)?;
+            last_fired.insert(rule_id.as_str(), value.as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
@@ -118,21 +140,20 @@ impl AlertRuleStore {
     /// never fired. Drives alert cooldown / de-duplication: the engine suppresses
     /// a new notification while `now − last_fired < cooldown`.
     ///
+    /// An O(1) point lookup of the index maintained by [`Self::insert_event`] —
+    /// the scheduler consults this on every run, so it must not scan the events.
+    ///
     /// # Errors
     ///
     /// Returns a database error on transaction errors.
     pub fn last_fired_for_rule(&self, rule_id: &AlertRuleId) -> Result<Option<DateTime<Utc>>> {
         let read_txn = self.db.begin_read()?;
-        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(EVENTS_TABLE)?;
-        let mut latest: Option<DateTime<Utc>> = None;
-        for entry in table.iter()? {
-            let (_, v) = entry?;
-            let event: AlertEvent = serde_json::from_slice(v.value())?;
-            if &event.rule_id == rule_id {
-                latest = Some(latest.map_or(event.fired_at, |cur| cur.max(event.fired_at)));
-            }
+        let table: redb::ReadOnlyTable<&str, &[u8]> = read_txn.open_table(LAST_FIRED_TABLE)?;
+        let key = rule_id.to_string();
+        match table.get(key.as_str())? {
+            Some(guard) => Ok(Some(serde_json::from_slice(guard.value())?)),
+            None => Ok(None),
         }
-        Ok(latest)
     }
 
     /// Mark an alert event as acknowledged. Returns `false` if the event is not found.
@@ -283,6 +304,32 @@ mod tests {
 
         let last = store.alerts().last_fired_for_rule(&rule.id).unwrap();
         assert_eq!(last, Some(newer.fired_at));
+    }
+
+    #[test]
+    fn deleting_a_rule_clears_its_last_fired_index() {
+        let (_dir, store) = open_test_db();
+        let probe_id = ProbeId::new();
+        let rule = make_rule(&probe_id);
+        store.alerts().insert_rule(&rule).unwrap();
+        store.alerts().insert_event(&make_event(&rule.id)).unwrap();
+        assert!(
+            store
+                .alerts()
+                .last_fired_for_rule(&rule.id)
+                .unwrap()
+                .is_some()
+        );
+
+        assert!(store.alerts().delete_rule(&rule.id).unwrap());
+        assert!(
+            store
+                .alerts()
+                .last_fired_for_rule(&rule.id)
+                .unwrap()
+                .is_none(),
+            "last-fired index entry must be cleared with the rule"
+        );
     }
 
     #[test]

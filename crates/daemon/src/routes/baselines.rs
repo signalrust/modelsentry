@@ -9,8 +9,8 @@ use axum::{
 use chrono::Utc;
 use modelsentry_common::{
     error::ModelSentryError,
-    models::{BASELINE_SCHEMA_VERSION, BaselineSnapshot, ProbeRun},
-    types::{BaselineId, ProbeId},
+    models::{BASELINE_SCHEMA_VERSION, BaselineSnapshot},
+    types::{BaselineId, ProbeId, RunId},
 };
 
 use crate::{routes::AppError, server::AppState};
@@ -57,33 +57,42 @@ async fn capture_baseline(
         .runs()
         .list_for_probe(&probe_id, state.config.alerts.baseline_capture_runs)?;
 
-    // Newest-first; keep only runs that produced at least one output embedding.
-    let mut usable: Vec<&ProbeRun> = runs
-        .iter()
-        .filter(|r| {
-            r.embeddings
-                .iter()
-                .any(|samples| samples.iter().any(|e| !e.is_empty()))
-        })
-        .collect();
+    // Newest-first metadata; fetch each run's embeddings (kept in a separate
+    // table) and keep only runs that produced at least one output embedding.
+    // `(run_id, embeddings)`, newest first.
+    let mut usable: Vec<(RunId, Vec<Vec<Vec<f32>>>)> = Vec::new();
+    for run in &runs {
+        let embeddings = state.store.runs().embeddings(&run.id)?.unwrap_or_default();
+        if embeddings
+            .iter()
+            .any(|samples| samples.iter().any(|e| !e.is_empty()))
+        {
+            usable.push((run.id.clone(), embeddings));
+        }
+    }
 
-    let newest = usable.first().copied().ok_or_else(|| {
+    let (newest_id, newest_embeddings) = usable.first().ok_or_else(|| {
         AppError(ModelSentryError::Config {
             message: "no runs with embeddings found for probe — run the probe first".to_string(),
         })
     })?;
+    let newest_id = newest_id.clone();
 
     // Pin the cloud to the newest run's embedding dimension; drop older runs
     // captured under a different embedding model (different dimension).
-    let dim = run_embedding_dim(newest);
-    usable.retain(|r| run_embedding_dim(r) == dim);
+    let dim = embedding_dim(newest_embeddings);
+    usable.retain(|(_, embeddings)| embedding_dim(embeddings) == dim);
 
     // Build per-prompt clouds: prompt_clouds[i] gathers every run's sample
     // embeddings for prompt i (skipping samples/prompts that failed).
-    let n_prompts = usable.iter().map(|r| r.embeddings.len()).max().unwrap_or(0);
+    let n_prompts = usable
+        .iter()
+        .map(|(_, embeddings)| embeddings.len())
+        .max()
+        .unwrap_or(0);
     let mut prompt_clouds: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n_prompts];
-    for run in &usable {
-        for (cloud, samples) in prompt_clouds.iter_mut().zip(run.embeddings.iter()) {
+    for (_, embeddings) in &usable {
+        for (cloud, samples) in prompt_clouds.iter_mut().zip(embeddings.iter()) {
             for sample in samples {
                 if !sample.is_empty() {
                     cloud.push(sample.clone());
@@ -100,17 +109,17 @@ async fn capture_baseline(
         embedding_model: state.config.providers.openai.embedding_model.clone(),
         prompt_clouds,
         n_runs: usable.len(),
-        run_id: newest.id.clone(),
+        run_id: newest_id,
     };
 
     state.store.baselines().insert(&baseline)?;
     Ok((StatusCode::CREATED, Json(baseline)))
 }
 
-/// Embedding dimensionality of a run (length of its first non-empty sample
-/// embedding), or 0 if the run produced none.
-fn run_embedding_dim(run: &ProbeRun) -> usize {
-    run.embeddings
+/// Embedding dimensionality of a run's embeddings (length of the first non-empty
+/// sample), or 0 if there are none.
+fn embedding_dim(embeddings: &[Vec<Vec<f32>>]) -> usize {
+    embeddings
         .iter()
         .flat_map(|samples| samples.iter())
         .find(|e| !e.is_empty())

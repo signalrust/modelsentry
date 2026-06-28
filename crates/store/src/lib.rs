@@ -36,8 +36,13 @@ use modelsentry_common::types::ProbeId;
 const PROBES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::PROBES);
 const BASELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::BASELINES);
 const RUNS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::RUNS);
+const RUN_EMBEDDINGS_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(table::RUN_EMBEDDINGS);
+const RUN_INDEX_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::RUN_INDEX);
 const ALERT_RULES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::ALERT_RULES);
 const ALERT_EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::ALERT_EVENTS);
+const ALERT_LAST_FIRED_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new(table::ALERT_LAST_FIRED);
 const SCHEDULE_STATE_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new(table::SCHEDULE_STATE);
 const ALERT_SPEND_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new(table::ALERT_SPEND);
@@ -125,8 +130,11 @@ impl AppStore {
         write_txn.open_table(PROBES_TABLE)?;
         write_txn.open_table(BASELINES_TABLE)?;
         write_txn.open_table(RUNS_TABLE)?;
+        write_txn.open_table(RUN_EMBEDDINGS_TABLE)?;
+        write_txn.open_table(RUN_INDEX_TABLE)?;
         write_txn.open_table(ALERT_RULES_TABLE)?;
         write_txn.open_table(ALERT_EVENTS_TABLE)?;
+        write_txn.open_table(ALERT_LAST_FIRED_TABLE)?;
         write_txn.open_table(SCHEDULE_STATE_TABLE)?;
         write_txn.open_table(ALERT_SPEND_TABLE)?;
         write_txn.commit()?;

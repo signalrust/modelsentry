@@ -167,6 +167,12 @@ pub struct ProbeRun {
     pub probe_id: ProbeId,
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
+    /// Per-prompt output embeddings. Stored apart from the rest of the run (in a
+    /// dedicated table) and **omitted** when a run is read back as metadata
+    /// (`RunStore::get` / `list_for_probe`), so it defaults to empty there; fetch
+    /// it explicitly via `RunStore::embeddings`. Present in-memory during a run
+    /// and when freshly constructed.
+    #[serde(default)]
     pub embeddings: Vec<Vec<Vec<f32>>>,
     pub completions: Vec<String>,
     pub drift_report: Option<DriftReport>,
