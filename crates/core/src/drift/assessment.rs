@@ -419,11 +419,19 @@ fn assess_pooled(
         .flat_map(|(_, _, samples)| samples.iter().cloned())
         .collect();
 
+    // Same resolution guard as the per-prompt gate: the permutation p-value
+    // floors at 1/(B+1), so raise B until it can resolve the target FPR. Without
+    // this the pooled fallback is silently un-fireable for target FPRs below
+    // 1/(n_permutations+1).
+    let n_perm = config
+        .n_permutations
+        .max(min_perms_for_resolution(config.target_fpr));
+
     let outcome = twosample::two_sample_test(
         &baseline_points,
         &run_points,
         config.kernel,
-        config.n_permutations,
+        n_perm,
         config.seed,
     )?;
 
@@ -636,6 +644,37 @@ mod tests {
             p1.low_variance_baseline,
             "deterministic baseline must be flagged"
         );
+    }
+
+    /// Regression guard (mirrors the per-prompt resolution guard): the **pooled
+    /// fallback** must also raise `B` so it can resolve a target FPR below the
+    /// default `1/(n_permutations+1)` floor. With single-sample baselines and a
+    /// `target_fpr` of 0.001, the default 200 permutations floor p at ~0.005 and
+    /// the detector could never fire — exactly the "silently un-fireable" bug the
+    /// guard prevents. Many prompts make the clean separation un-reproducible by
+    /// any relabelling, so the observed energy is the strict maximum and p
+    /// resolves to `1/(B+1)`.
+    #[test]
+    fn pooled_fallback_resolves_below_default_permutation_floor() {
+        let dim = 4;
+        // Single-sample baselines ⇒ pooled fallback path.
+        let baseline: Vec<Vec<Vec<f32>>> = (0..12).map(|_| cloud(1, dim, 0.0, 0.0)).collect();
+        // Every run output lands far from the baseline cluster ⇒ max separation.
+        let run: Vec<Vec<Vec<f32>>> = (0..12).map(|_| one(point(dim, 50.0))).collect();
+        let cfg = AssessmentConfig {
+            target_fpr: 0.001,
+            n_permutations: 200, // below the 1/0.001 = 1000 the guard must reach
+            seed: 1,
+            ..AssessmentConfig::default()
+        };
+        let out = assess(&baseline, &run, &cfg).unwrap();
+        assert_eq!(out.method, METHOD_POOLED);
+        assert!(
+            out.combined_p_value <= 0.001,
+            "pooled fallback must resolve below target_fpr 0.001 (raised B), got {}",
+            out.combined_p_value
+        );
+        assert_ne!(out.level, DriftLevel::None);
     }
 
     #[test]
