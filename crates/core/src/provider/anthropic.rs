@@ -25,25 +25,27 @@ use crate::drift::Embedding;
 
 /// Anthropic Messages API adapter.
 ///
-/// Created once and shared via [`super::DynProvider`].  The inner
-/// [`reqwest::Client`] is already connection-pooled and cheap to clone.
+/// Built per run from a **shared** [`reqwest::Client`] (injected, so the
+/// connection pool is reused across runs rather than rebuilt each time). The
+/// per-request timeout is applied on each call.
 #[derive(Debug)]
 pub struct AnthropicProvider {
     api_key: ApiKey,
     client: reqwest::Client,
+    request_timeout: std::time::Duration,
     model: String,
     base_url: String,
     max_tokens: u32,
 }
 
 impl AnthropicProvider {
-    /// Create a provider with a 30-second request timeout.
+    /// Create a provider over the shared `client`, with a 30-second per-request
+    /// timeout.
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Config`] if `model` is empty.
-    /// - [`ModelSentryError::Provider`] if the HTTP client cannot be built.
-    pub fn new(api_key: ApiKey, model: impl Into<String>) -> Result<Self> {
+    /// [`ModelSentryError::Config`] if `model` is empty.
+    pub fn new(client: reqwest::Client, api_key: ApiKey, model: impl Into<String>) -> Result<Self> {
         let model = model.into();
         if model.is_empty() {
             return Err(ModelSentryError::Config {
@@ -51,18 +53,10 @@ impl AnthropicProvider {
             });
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                defaults::anthropic::TIMEOUT_SECS,
-            ))
-            .build()
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("failed to build HTTP client: {e}"),
-            })?;
-
         Ok(Self {
             api_key,
             client,
+            request_timeout: std::time::Duration::from_secs(defaults::anthropic::TIMEOUT_SECS),
             model,
             base_url: defaults::anthropic::BASE_URL.to_string(),
             max_tokens: defaults::MAX_TOKENS,
@@ -155,6 +149,7 @@ impl LlmProvider for AnthropicProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(self.request_timeout)
             .header(defaults::anthropic::API_KEY_HEADER, self.api_key.expose())
             .header(
                 defaults::anthropic::VERSION_HEADER,
@@ -219,9 +214,13 @@ mod tests {
     use super::*;
 
     fn make_provider(base_url: &str) -> AnthropicProvider {
-        AnthropicProvider::new(ApiKey::new("test-key".into()), defaults::anthropic::MODEL)
-            .expect("valid provider config")
-            .with_base_url(base_url.to_string())
+        AnthropicProvider::new(
+            reqwest::Client::new(),
+            ApiKey::new("test-key".into()),
+            defaults::anthropic::MODEL,
+        )
+        .expect("valid provider config")
+        .with_base_url(base_url.to_string())
     }
 
     fn ok_response(text: &str) -> serde_json::Value {
@@ -334,18 +333,23 @@ mod tests {
             .mount(&server)
             .await;
 
-        AnthropicProvider::new(ApiKey::new("test-key".into()), defaults::anthropic::MODEL)
-            .expect("valid provider config")
-            .with_base_url(server.uri())
-            .with_max_tokens(7)
-            .complete("hi")
-            .await
-            .unwrap();
+        AnthropicProvider::new(
+            reqwest::Client::new(),
+            ApiKey::new("test-key".into()),
+            defaults::anthropic::MODEL,
+        )
+        .expect("valid provider config")
+        .with_base_url(server.uri())
+        .with_max_tokens(7)
+        .complete("hi")
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn new_rejects_empty_model_string() {
-        let err = AnthropicProvider::new(ApiKey::new("key".into()), "").unwrap_err();
+        let err = AnthropicProvider::new(reqwest::Client::new(), ApiKey::new("key".into()), "")
+            .unwrap_err();
         assert!(err.to_string().contains("model name must not be empty"));
     }
 

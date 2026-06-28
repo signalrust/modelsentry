@@ -101,7 +101,7 @@ modelsentry/
 │   │       ├── lib.rs          ← AppStore, open_db()
 │   │       ├── probe_store.rs
 │   │       ├── baseline_store.rs
-│   │       ├── run_store.rs
+│   │       ├── run_store.rs       ← run metadata / embeddings / time-ordered index (3 tables)
 │   │       ├── alert_store.rs
 │   │       ├── schedule_store.rs ← per-probe next-run state (restart catch-up)
 │   │       └── spend_store.rs    ← per-rule alpha-spend ledger (sequential control)

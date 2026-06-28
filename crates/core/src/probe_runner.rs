@@ -82,27 +82,29 @@ impl ProbeRunner {
                         }
                     })?;
                     // Drift is measured on the model's OUTPUT, so we complete
-                    // first and embed the completion — never the (fixed) prompt.
+                    // first and embed the completions — never the (fixed) prompt.
                     // Draw `n_samples` completions to build a within-prompt
-                    // distribution; keep the first usable one for display.
-                    let mut sample_embeddings: Vec<Vec<f32>> = Vec::with_capacity(n_samples);
-                    let mut representative: Option<String> = None;
+                    // distribution, then embed them in a single batched call
+                    // (one round-trip instead of one per sample).
+                    let mut answers: Vec<String> = Vec::with_capacity(n_samples);
                     for _ in 0..n_samples {
                         let Ok(answer) = prov.complete(&text).await else {
                             continue;
                         };
-                        if answer.is_empty() {
-                            continue;
-                        }
-                        if representative.is_none() {
-                            representative = Some(answer.clone());
-                        }
-                        if let Ok(mut vecs) = prov.embed(std::slice::from_ref(&answer)).await {
-                            if !vecs.is_empty() {
-                                sample_embeddings.push(vecs.remove(0).as_slice().to_vec());
-                            }
+                        if !answer.is_empty() {
+                            answers.push(answer);
                         }
                     }
+                    // First usable completion is the representative for display.
+                    let representative = answers.first().cloned();
+                    let sample_embeddings: Vec<Vec<f32>> = if answers.is_empty() {
+                        Vec::new()
+                    } else {
+                        prov.embed(&answers).await.map_or_else(
+                            |_| Vec::new(),
+                            |vecs| vecs.iter().map(|e| e.as_slice().to_vec()).collect(),
+                        )
+                    };
                     Ok::<_, modelsentry_common::error::ModelSentryError>((
                         sample_embeddings,
                         representative,

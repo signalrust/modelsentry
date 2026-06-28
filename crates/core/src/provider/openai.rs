@@ -20,12 +20,14 @@ use crate::drift::Embedding;
 
 /// `OpenAI` Chat Completions + Embeddings API adapter.
 ///
-/// Created once and shared via [`super::DynProvider`]. The inner
-/// [`reqwest::Client`] is already connection-pooled and cheap to clone.
+/// Built per run from a **shared** [`reqwest::Client`] (injected, so the
+/// connection pool is reused across runs rather than rebuilt each time). The
+/// per-request timeout is applied on each call.
 #[derive(Debug)]
 pub struct OpenAiProvider {
     api_key: ApiKey,
     client: reqwest::Client,
+    request_timeout: std::time::Duration,
     model: String,
     embedding_model: String,
     embed_dim: usize,
@@ -34,14 +36,14 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    /// Create a provider with a 30-second request timeout and default
-    /// embedding model (`text-embedding-3-small`, 1536 dims).
+    /// Create a provider over the shared `client`, with a 30-second per-request
+    /// timeout and the default embedding model (`text-embedding-3-small`, 1536
+    /// dims).
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Config`] if `model` is empty.
-    /// - [`ModelSentryError::Provider`] if the HTTP client cannot be built.
-    pub fn new(api_key: ApiKey, model: impl Into<String>) -> Result<Self> {
+    /// [`ModelSentryError::Config`] if `model` is empty.
+    pub fn new(client: reqwest::Client, api_key: ApiKey, model: impl Into<String>) -> Result<Self> {
         let model = model.into();
         if model.is_empty() {
             return Err(ModelSentryError::Config {
@@ -49,18 +51,10 @@ impl OpenAiProvider {
             });
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                defaults::openai::TIMEOUT_SECS,
-            ))
-            .build()
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("failed to build HTTP client: {e}"),
-            })?;
-
         Ok(Self {
             api_key,
             client,
+            request_timeout: std::time::Duration::from_secs(defaults::openai::TIMEOUT_SECS),
             model,
             embedding_model: defaults::openai::EMBEDDING_MODEL.to_string(),
             embed_dim: defaults::openai::EMBEDDING_DIM,
@@ -171,6 +165,7 @@ impl LlmProvider for OpenAiProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(self.request_timeout)
             .bearer_auth(self.api_key.expose())
             .json(&request_body)
             .send()
@@ -230,6 +225,7 @@ impl LlmProvider for OpenAiProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(self.request_timeout)
             .bearer_auth(self.api_key.expose())
             .json(&request_body)
             .send()
@@ -281,9 +277,13 @@ mod tests {
     use super::*;
 
     fn make_provider(base_url: &str) -> OpenAiProvider {
-        OpenAiProvider::new(ApiKey::new("test-key".into()), defaults::openai::MODEL)
-            .expect("valid provider config")
-            .with_base_url(base_url.to_string())
+        OpenAiProvider::new(
+            reqwest::Client::new(),
+            ApiKey::new("test-key".into()),
+            defaults::openai::MODEL,
+        )
+        .expect("valid provider config")
+        .with_base_url(base_url.to_string())
     }
 
     fn chat_ok(text: &str) -> serde_json::Value {
@@ -336,13 +336,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        OpenAiProvider::new(ApiKey::new("test-key".into()), defaults::openai::MODEL)
-            .expect("valid provider config")
-            .with_base_url(server.uri())
-            .with_max_tokens(7)
-            .complete("hi")
-            .await
-            .unwrap();
+        OpenAiProvider::new(
+            reqwest::Client::new(),
+            ApiKey::new("test-key".into()),
+            defaults::openai::MODEL,
+        )
+        .expect("valid provider config")
+        .with_base_url(server.uri())
+        .with_max_tokens(7)
+        .complete("hi")
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

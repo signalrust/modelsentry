@@ -6,6 +6,48 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+### Performance
+
+- **Provider HTTP client is shared, not rebuilt per run.** Providers now take an
+  injected `reqwest::Client` (a process-wide pooled singleton) instead of each
+  `Provider::new` building its own on every scheduled run; the per-request
+  timeout is applied per call, so per-provider timeouts (e.g. Ollama's longer
+  one) are preserved. (`crates/daemon/src/provider_factory.rs`, all providers)
+- **Per-prompt embeddings are batched into one call.** The probe runner collects
+  a prompt's `samples_per_prompt` completions, then embeds them in a single
+  request instead of one round-trip per sample. (`crates/core/src/probe_runner.rs`)
+- **Gram matrix computes only the upper triangle.** The kernel is symmetric, so
+  the two-sample test now does half the pairwise-distance work and mirrors it.
+  (`crates/core/src/drift/twosample.rs`)
+- **Cooldown lookup is O(1).** `AlertRuleStore::last_fired_for_rule` — consulted
+  on every scheduled run — read by scanning and deserializing every stored alert
+  event. A per-rule last-fired index (`alert_last_fired`), maintained on event
+  insert and cleared on rule delete, replaces the scan with a point lookup.
+  (`crates/store/src/alert_store.rs`)
+
+### Fixed
+
+- **Pooled drift fallback could be silently un-fireable.** The per-prompt gate
+  already raised the permutation count `B` so `1/(B+1) ≤ target_fpr`, but the
+  pooled (single-sample baseline) fallback used the raw configured count, so a
+  `target_fpr` below `1/(n_permutations+1)` (e.g. 0.001 with the default 200)
+  could never alert. The pooled path now applies the same resolution guard, so
+  the "never silently mute" invariant holds in both modes.
+  (`crates/core/src/drift/assessment.rs`)
+
+### Changed
+
+- **Run storage split for fast listing (no more full-table scans).** A probe run
+  is now stored across three tables: lightweight **metadata** (status,
+  timestamps, completions, drift report) keyed by run id; the heavy per-prompt
+  **embeddings** in a separate table keyed by run id; and a time-ordered
+  **index** (`{probe_id}|{rev_ts}|{run_id}`). Listing a probe's recent runs is a
+  bounded range scan that decodes only metadata — `O(limit)` instead of decoding
+  every run (and its megabytes of embeddings) ever recorded. Embeddings are
+  loaded only by baseline capture, via the new `RunStore::embeddings`. The
+  dashboard run list and `GET /runs/{id}` no longer carry embedding payloads.
+  (`crates/store/src/run_store.rs`, `crates/daemon/src/routes/baselines.rs`)
+
 ### Added
 
 - **Sequential control — rolling-window alpha-spending.** New optional

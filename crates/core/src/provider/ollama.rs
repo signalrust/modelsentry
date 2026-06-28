@@ -20,44 +20,43 @@ use crate::drift::Embedding;
 
 /// Ollama HTTP API adapter.
 ///
-/// Created once and shared via [`super::DynProvider`]. The inner
-/// [`reqwest::Client`] is already connection-pooled and cheap to clone.
+/// Built per run from a **shared** [`reqwest::Client`] (injected, so the
+/// connection pool is reused across runs rather than rebuilt each time). The
+/// per-request timeout is applied on each call.
 #[derive(Debug)]
 pub struct OllamaProvider {
     client: reqwest::Client,
+    request_timeout: std::time::Duration,
     model: String,
     base_url: String,
     embed_dim: usize,
 }
 
 impl OllamaProvider {
-    /// Create a provider targeting a local Ollama server.
+    /// Create a provider over the shared `client`, targeting a local Ollama
+    /// server.
     ///
     /// `base_url` should be the root of the server, e.g.
-    /// `http://localhost:11434`. A 120-second timeout is used because
-    /// first-run generation can be slow on CPU.
+    /// `http://localhost:11434`. A 120-second per-request timeout is used
+    /// because first-run generation can be slow on CPU.
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Config`] if `model` is empty.
-    /// - [`ModelSentryError::Provider`] if the HTTP client cannot be built.
-    pub fn new(model: impl Into<String>, base_url: impl Into<String>) -> Result<Self> {
+    /// [`ModelSentryError::Config`] if `model` is empty.
+    pub fn new(
+        client: reqwest::Client,
+        model: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Result<Self> {
         let model = model.into();
         if model.is_empty() {
             return Err(ModelSentryError::Config {
                 message: "model name must not be empty".into(),
             });
         }
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                defaults::ollama::TIMEOUT_SECS,
-            ))
-            .build()
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("failed to build HTTP client: {e}"),
-            })?;
         Ok(Self {
             client,
+            request_timeout: std::time::Duration::from_secs(defaults::ollama::TIMEOUT_SECS),
             model,
             base_url: base_url.into(),
             embed_dim: defaults::ollama::EMBEDDING_DIM,
@@ -133,6 +132,7 @@ impl LlmProvider for OllamaProvider {
             let response = self
                 .client
                 .post(&url)
+                .timeout(self.request_timeout)
                 .json(&body)
                 .send()
                 .await
@@ -178,6 +178,7 @@ impl LlmProvider for OllamaProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(self.request_timeout)
             .json(&body)
             .send()
             .await
@@ -228,7 +229,8 @@ mod tests {
     use super::*;
 
     fn make_provider(base_url: &str) -> OllamaProvider {
-        OllamaProvider::new(defaults::ollama::MODEL, base_url).expect("valid provider config")
+        OllamaProvider::new(reqwest::Client::new(), defaults::ollama::MODEL, base_url)
+            .expect("valid provider config")
     }
 
     fn generate_ok(text: &str) -> serde_json::Value {
@@ -317,7 +319,8 @@ mod tests {
 
     #[test]
     fn empty_model_is_rejected() {
-        let err = OllamaProvider::new("", defaults::ollama::BASE_URL).unwrap_err();
+        let err = OllamaProvider::new(reqwest::Client::new(), "", defaults::ollama::BASE_URL)
+            .unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
     }
 }

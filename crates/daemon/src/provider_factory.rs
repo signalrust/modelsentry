@@ -14,7 +14,7 @@
 //! Both the scheduler and the `run-now` route call [`build_provider`], so the
 //! mapping from spec → provider lives in exactly one function.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use modelsentry_common::{
     config::AppConfig,
@@ -29,6 +29,19 @@ use modelsentry_core::provider::{
 
 use crate::vault::Vault;
 
+/// Process-wide HTTP client shared by every provider built here.
+///
+/// `reqwest::Client` owns a connection pool and is internally reference-counted,
+/// so cloning is cheap and shares that pool. Building it once (lazily) — rather
+/// than rebuilding one inside every `Provider::new` on every scheduled run —
+/// keeps keep-alive connections and the TLS config alive across runs. It carries
+/// no global timeout: each provider applies its own per-request timeout, which
+/// differs by provider (e.g. Ollama allows longer for local CPU generation).
+fn shared_http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
 /// Construct the [`DynProvider`] a probe's [`ProviderSpec`] describes, pulling
 /// the secret from the vault and infrastructure defaults from `config`.
 ///
@@ -42,11 +55,12 @@ pub fn build_provider(
     vault: &Vault,
     config: &AppConfig,
 ) -> Result<DynProvider> {
+    let client = shared_http_client();
     match spec {
         ProviderSpec::OpenAi { model } => {
             let key = require_key(vault, spec.provider_id())?;
             let cfg = &config.providers.openai;
-            let p = OpenAiProvider::new(key, model)?
+            let p = OpenAiProvider::new(client, key, model)?
                 .with_base_url(cfg.base_url.clone())
                 .with_embedding_model(&cfg.embedding_model, cfg.embedding_dim)
                 .with_max_tokens(cfg.max_tokens);
@@ -55,14 +69,14 @@ pub fn build_provider(
         ProviderSpec::Anthropic { model } => {
             let key = require_key(vault, spec.provider_id())?;
             let cfg = &config.providers.anthropic;
-            let p = AnthropicProvider::new(key, model)?
+            let p = AnthropicProvider::new(client, key, model)?
                 .with_base_url(cfg.base_url.clone())
                 .with_max_tokens(cfg.max_tokens);
             Ok(Arc::new(p) as DynProvider)
         }
         ProviderSpec::Ollama { model, base_url } => {
             // Ollama needs no API key — the base URL is the only instance state.
-            let p = OllamaProvider::new(model.clone(), base_url.clone())?;
+            let p = OllamaProvider::new(client, model.clone(), base_url.clone())?;
             Ok(Arc::new(p) as DynProvider)
         }
         ProviderSpec::Azure {
@@ -76,10 +90,15 @@ pub fn build_provider(
             let embedding_deployment = embedding_deployment
                 .clone()
                 .or_else(|| cfg.embedding_deployment.clone());
-            let p =
-                AzureOpenAiProvider::new(key, &cfg.endpoint, chat_deployment, &cfg.api_version)?
-                    .with_embedding(embedding_deployment, cfg.embedding_dim)
-                    .with_max_tokens(cfg.max_tokens);
+            let p = AzureOpenAiProvider::new(
+                client,
+                key,
+                &cfg.endpoint,
+                chat_deployment,
+                &cfg.api_version,
+            )?
+            .with_embedding(embedding_deployment, cfg.embedding_dim)
+            .with_max_tokens(cfg.max_tokens);
             Ok(Arc::new(p) as DynProvider)
         }
     }

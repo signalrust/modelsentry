@@ -31,12 +31,14 @@ use crate::drift::Embedding;
 
 /// Azure OpenAI Chat Completions + Embeddings API adapter.
 ///
-/// Created once per run and shared via [`super::DynProvider`]. The inner
-/// [`reqwest::Client`] is already connection-pooled and cheap to clone.
+/// Built per run from a **shared** [`reqwest::Client`] (injected, so the
+/// connection pool is reused across runs rather than rebuilt each time). The
+/// per-request timeout is applied on each call.
 #[derive(Debug)]
 pub struct AzureOpenAiProvider {
     api_key: ApiKey,
     client: reqwest::Client,
+    request_timeout: std::time::Duration,
     /// Resource endpoint with any trailing slash trimmed.
     endpoint: String,
     chat_deployment: String,
@@ -47,17 +49,17 @@ pub struct AzureOpenAiProvider {
 }
 
 impl AzureOpenAiProvider {
-    /// Create a provider for an Azure OpenAI resource.
+    /// Create a provider for an Azure OpenAI resource over the shared `client`.
     ///
     /// `endpoint` is the resource root (e.g.
     /// `https://my-resource.openai.azure.com`); a trailing slash is trimmed.
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Config`] if `endpoint`, `chat_deployment`, or
-    ///   `api_version` is empty.
-    /// - [`ModelSentryError::Provider`] if the HTTP client cannot be built.
+    /// [`ModelSentryError::Config`] if `endpoint`, `chat_deployment`, or
+    /// `api_version` is empty.
     pub fn new(
+        client: reqwest::Client,
         api_key: ApiKey,
         endpoint: impl Into<String>,
         chat_deployment: impl Into<String>,
@@ -82,16 +84,10 @@ impl AzureOpenAiProvider {
             });
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(azure_defaults::TIMEOUT_SECS))
-            .build()
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("failed to build HTTP client: {e}"),
-            })?;
-
         Ok(Self {
             api_key,
             client,
+            request_timeout: std::time::Duration::from_secs(azure_defaults::TIMEOUT_SECS),
             endpoint,
             chat_deployment,
             embedding_deployment: None,
@@ -204,6 +200,7 @@ impl LlmProvider for AzureOpenAiProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(self.request_timeout)
             .header(azure_defaults::API_KEY_HEADER, self.api_key.expose())
             .json(&EmbedRequest { input: texts })
             .send()
@@ -254,6 +251,7 @@ impl LlmProvider for AzureOpenAiProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(self.request_timeout)
             .header(azure_defaults::API_KEY_HEADER, self.api_key.expose())
             .json(&ChatRequest {
                 max_completion_tokens: self.max_tokens,
@@ -318,6 +316,7 @@ mod tests {
 
     fn make_provider(base_url: &str) -> AzureOpenAiProvider {
         AzureOpenAiProvider::new(
+            reqwest::Client::new(),
             ApiKey::new("test-key".into()),
             base_url,
             "gpt-4o-prod",
@@ -369,6 +368,7 @@ mod tests {
             .await;
 
         AzureOpenAiProvider::new(
+            reqwest::Client::new(),
             ApiKey::new("test-key".into()),
             format!("{}/", server.uri()),
             "gpt-4o-prod",
@@ -454,15 +454,21 @@ mod tests {
 
     #[test]
     fn empty_endpoint_is_rejected() {
-        let err =
-            AzureOpenAiProvider::new(ApiKey::new("k".into()), "", "gpt-4o-prod", "2024-10-21")
-                .unwrap_err();
+        let err = AzureOpenAiProvider::new(
+            reqwest::Client::new(),
+            ApiKey::new("k".into()),
+            "",
+            "gpt-4o-prod",
+            "2024-10-21",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("endpoint"));
     }
 
     #[test]
     fn empty_chat_deployment_is_rejected() {
         let err = AzureOpenAiProvider::new(
+            reqwest::Client::new(),
             ApiKey::new("k".into()),
             "https://x.example",
             "",

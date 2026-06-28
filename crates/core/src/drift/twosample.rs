@@ -139,14 +139,20 @@ fn gram_matrix(points: &[Vec<f32>], kernel: Kernel) -> Vec<f64> {
         Kernel::Energy => 0.0,
     };
     let two_sigma_sq = 2.0 * bandwidth * bandwidth;
+    // The kernel is symmetric (`k(a,b) = k(b,a)`), so compute only the upper
+    // triangle (including the diagonal) and mirror it — halving the `sq_dist`
+    // work, which dominates for high-dimensional embeddings.
     for (i, a) in points.iter().enumerate() {
-        for (j, b) in points.iter().enumerate() {
+        for (j, b) in points.iter().enumerate().skip(i) {
             let d2 = sq_dist(a, b);
             let k = match kernel {
                 Kernel::Rbf { .. } => (-d2 / two_sigma_sq).exp(),
                 Kernel::Energy => -d2.sqrt(),
             };
             if let Some(slot) = gram.get_mut(i * n + j) {
+                *slot = k;
+            }
+            if let Some(slot) = gram.get_mut(j * n + i) {
                 *slot = k;
             }
         }

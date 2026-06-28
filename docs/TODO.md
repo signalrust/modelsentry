@@ -4,7 +4,7 @@ Status snapshot after the provider-unification + calibrated-drift rebuild
 (`b5462d2`), per-prompt multi-sampling (`7beabae`), and the
 email/cooldown/scheduler-persistence/effect-size/baseline-health batch (in the
 working tree as of this audit — **verified green: `cargo fmt --check` clean,
-`clippy -D warnings` clean, `cargo test --workspace` = 225 pass / 0 fail**).
+`clippy -D warnings` clean, `cargo test --workspace` = 230 pass / 0 fail**).
 
 **Priority legend.** **P1/Blocking** = a competent UI-only user cannot complete
 the core loop (configure → probe → baseline → drift → alert) without it.
@@ -99,8 +99,8 @@ the core loop (configure → probe → baseline → drift → alert) without it.
   historical/reference, not a description of current behavior.
 - Docs refreshed (README, ARCHITECTURE, methodology §8, CHANGELOG, config).
 - Verification this audit: `clippy -D warnings` clean; `cargo fmt --check` clean;
-  `cargo test --workspace` **225 pass / 0 fail** (core 113 incl. 10 integration,
-  daemon 50, common 41, store 21, cli 0).
+  `cargo test --workspace` **230 pass / 0 fail** (core 114 incl. 10 integration,
+  daemon 50, store 25, common 41, cli 0).
 
 ---
 
@@ -181,7 +181,7 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
       the browser calls `:7740` directly (CORS). Correct the wording.
 - [ ] **Release checklist + test counts.** Reconcile
       `docs/RELEASE_READINESS_CHECKLIST.md` and any stale counts before tagging —
-      the current suite is **225** tests (this doc previously said 200).
+      the current suite is **230** tests (this doc previously said 200).
 - [ ] **Track `proc-macro-error2` (unmaintained).** Transitive via `tabled`/`age`;
       not a CVE, allowed by `cargo audit`. Revisit on upstream upgrades.
 - [ ] **No-magic-values sweep (frontend).** Audit remaining inline literals in
@@ -193,17 +193,45 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
 
 ## Known limitations & architecture smells (backlog, non-blocking)
 
-- **Per-run `reqwest::Client` rebuild** in the provider resolver — minor waste;
-  could reuse a shared client.
-- **Run / event retention.** `RunStore`/`AlertRuleStore` grow unbounded — every
-  scheduled run and event is stored forever. Add a retention/pruning policy
-  before any long-running deployment.
+- **Run / event retention.** `RunStore`/`AlertRuleStore` still grow unbounded —
+  every scheduled run and event is stored forever. Add a retention/pruning policy
+  before any long-running deployment. *(The read-side scan smell is now fixed for
+  runs — see "Resolved"; this is the remaining storage-growth half.)*
+- **`AlertRuleStore::list_events` still full-scans.** It iterates and
+  deserializes every event to return the recent N. Only hit by the manual events
+  route (not the scheduler), so low priority — a time-ordered index keyed like
+  `run_index` would make it `O(limit)` and pair naturally with event retention.
+  (`last_fired_for_rule` is now O(1) — see "Resolved".)
+- **Blocking redb I/O on async worker threads.** Store calls are synchronous and
+  run inside async tasks. *Re-scoped after the run-storage split + cooldown
+  index:* the pathological scans are gone, so store ops on the scheduler path are
+  now µs-scale point lookups / bounded range scans where `spawn_blocking`'s
+  thread-handoff would cost more than it saves. Revisit only if profiling shows a
+  hot spot (e.g. the CPU-bound drift permutation test → `block_in_place`); not a
+  blanket wrap.
 - **Test gaps (qualitative).** No frontend tests. Calibration is empirically
   validated (null-FPR Monte-Carlo) and the scheduler has restart-catch-up and
   shutdown tests, but there are still no store concurrency-stress tests.
 
 ### Resolved (was here)
 
+- ~~Per-run `reqwest::Client` rebuild~~ — **done.** Providers take an injected
+  process-wide pooled client; per-request timeouts preserve per-provider values.
+- ~~Embeddings sent one-per-call (batch size 1)~~ — **done.** The runner batches a
+  prompt's samples into a single `embed` request.
+- ~~Redundant full Gram matrix~~ — **done.** Only the upper triangle is computed
+  and mirrored (symmetric kernel).
+- ~~`last_fired_for_rule` full-scans every event (scheduler hot path)~~ —
+  **done.** A per-rule `alert_last_fired` index (maintained on insert, cleared on
+  rule delete) makes the cooldown lookup O(1). This is the substance of the
+  "blocking redb I/O" concern — eliminated the slow op rather than wrapping it.
+- ~~Run listing full-scans + decodes all embeddings~~ — **done.** Runs are split
+  into metadata / embeddings / time-ordered index tables; `list_for_probe` is a
+  bounded `O(limit)` range scan that never decodes embeddings, and embeddings are
+  fetched (by run id) only by baseline capture. (`run_store.rs`)
+- ~~Pooled drift fallback silently un-fireable below the permutation floor~~ —
+  **done.** The pooled path now applies the same `min_perms_for_resolution`
+  guard as the per-prompt gate. (`assessment.rs`)
 - ~~Scheduler does not persist next-run times~~ — **done.** Per-probe next-run is
   persisted (`schedule_state` table); on restart an overdue probe runs once
   (catch-up) then resumes its cadence.
@@ -242,7 +270,7 @@ These are positioning corrections a referee/buyer would catch — keep claims ti
 | Statistical method (calibration) | 9/10 | Stratified-permutation gate + per-prompt multi-sampling; empirically calibrated; f64 sums + baseline-health done; **alpha-spending / sequential control now shipped** (`[alerts.sequential]`, bounds expected false alarms per rule per window). Residual to 10: dashboard surfacing of the budget (UX, not method). |
 | Architecture / design | 8/10 | Unified `ProviderSpec`, single resolver, clean layering. |
 | Code quality | 9/10 | `clippy -D warnings`, no-unwrap lint, centralized constants, real docs, f64 numeric care. |
-| Test quality | 7/10 | Validates calibration (null-FPR MC) + power; 225 tests; ~no frontend tests. |
+| Test quality | 7/10 | Validates calibration (null-FPR MC) + power; 230 tests; ~no frontend tests. |
 | Frontend | 5/10 | Good design system; **control plane still incomplete (P1)**; static LIVE badge; theme leaks. |
 | Security hygiene | 8/10 | age vault, constant-time key compare, SSRF guard, body/rate limits. |
 | Product completeness | 4/10 | Core loop still needs CLI for baseline/rule capture; onboarding friction. (Email + cooldown shipped.) |
