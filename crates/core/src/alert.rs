@@ -36,6 +36,47 @@ pub struct AlertEngine {
     /// `None` ⇒ email is unconfigured, so [`AlertChannel::Email`] is logged and
     /// skipped rather than silently dropped.
     mailer: Option<Arc<EmailMailer>>,
+    /// Rolling-window sequential control (alpha-spending). `None` (the default)
+    /// tests every run independently at the rule's `target_fpr`. When set, each
+    /// rule may spend at most [`SequentialControl::alpha_budget`] of testing
+    /// level over a [`SequentialControl::window`], bounding the expected number
+    /// of false alarms per rule per window.
+    sequential: Option<SequentialControl>,
+}
+
+/// Rolling-window alpha-spending parameters for sequential control.
+///
+/// Caps the **expected number of false alarms** per rule per `window` at
+/// `alpha_budget`. The engine spends each look's testing level from the budget
+/// (debit-on-look), so the cumulative per-window spend telescopes to exactly
+/// `alpha_budget` and the rule falls silent once it is exhausted — until older
+/// spends age out of the window.
+#[derive(Debug, Clone, Copy)]
+pub struct SequentialControl {
+    /// Length of the rolling window over which the budget applies.
+    pub window: Duration,
+    /// Expected false alarms tolerated per rule per `window`.
+    pub alpha_budget: f64,
+}
+
+/// One rule's alpha debit for a single run (debit-on-look). The caller persists
+/// these to the spend ledger so the budget survives restarts and spans runs.
+#[derive(Debug, Clone)]
+pub struct RuleSpend {
+    /// Rule that was looked at.
+    pub rule_id: AlertRuleId,
+    /// Testing level spent on this look (`min(target_fpr, remaining_budget)`).
+    pub alpha: f64,
+}
+
+/// Result of [`AlertEngine::evaluate_and_fire`]: the events that fired plus the
+/// alpha debited from each rule's window budget this run.
+#[derive(Debug, Clone, Default)]
+pub struct AlertOutcome {
+    /// Events for rules that triggered and were not suppressed.
+    pub events: Vec<AlertEvent>,
+    /// Per-rule alpha spends to persist. Empty when sequential control is off.
+    pub spends: Vec<RuleSpend>,
 }
 
 impl AlertEngine {
@@ -50,6 +91,7 @@ impl AlertEngine {
             allow_private_targets: false,
             cooldown: Duration::zero(),
             mailer: None,
+            sequential: None,
         }
     }
 
@@ -77,9 +119,26 @@ impl AlertEngine {
         self
     }
 
+    /// Enable rolling-window sequential control (alpha-spending). `None` (the
+    /// default) tests every run independently at `target_fpr`. A control whose
+    /// `alpha_budget` is non-positive is treated as disabled.
+    #[must_use]
+    pub fn with_sequential(mut self, sequential: Option<SequentialControl>) -> Self {
+        self.sequential = sequential.filter(|s| s.alpha_budget > 0.0);
+        self
+    }
+
+    /// The rolling window over which alpha is budgeted, or `None` when
+    /// sequential control is disabled. The caller uses it to bound the spend
+    /// ledger lookup (`now − window`) and to prune aged-out spends.
+    #[must_use]
+    pub fn sequential_window(&self) -> Option<Duration> {
+        self.sequential.map(|s| s.window)
+    }
+
     /// Evaluate `report` against every active rule. For each triggered rule that
-    /// is **not** within its cooldown window, fire all configured channels and
-    /// collect the resulting [`AlertEvent`]s.
+    /// is **not** within its cooldown window or out of alpha budget, fire all
+    /// configured channels and collect the resulting [`AlertEvent`]s.
     ///
     /// `last_fired` maps a rule id to the timestamp it most recently fired (the
     /// caller loads this from the store); a rule absent from the map has never
@@ -87,18 +146,47 @@ impl AlertEngine {
     /// is de-duplicated — the run is still assessed, only the notification is
     /// suppressed.
     ///
+    /// `spent_alpha` maps a rule id to the alpha it has already spent inside the
+    /// current window (the caller sums the spend ledger over [the window]). It
+    /// is consulted only when sequential control is enabled: the rule is tested
+    /// at `min(target_fpr, alpha_budget − spent)`, and the returned
+    /// [`AlertOutcome::spends`] records what each look debited so the caller can
+    /// persist it. **Every active rule looked at spends** (debit-on-look),
+    /// whether or not it fired, so a budget bounds the expected false alarms
+    /// regardless of cooldown suppression.
+    ///
     /// Channel delivery errors are logged at `WARN` level but do not abort
     /// processing of other rules or channels.
+    ///
+    /// [the window]: SequentialControl::window
     pub async fn evaluate_and_fire(
         &self,
         report: &DriftReport,
         rules: &[AlertRule],
         last_fired: &HashMap<AlertRuleId, DateTime<Utc>>,
-    ) -> Vec<AlertEvent> {
-        let mut events = Vec::new();
+        spent_alpha: &HashMap<AlertRuleId, f64>,
+    ) -> AlertOutcome {
+        let mut outcome = AlertOutcome::default();
         let now = Utc::now();
         for rule in rules {
-            if !rule.active || !Self::is_triggered(report, rule) {
+            if !rule.active {
+                continue;
+            }
+            // Effective testing level for this look: the rule's `target_fpr`,
+            // capped by the budget remaining in the window when sequential
+            // control is on. A look at level `alpha` spends `alpha` from the
+            // budget (debit-on-look); the per-window sum telescopes to exactly
+            // `alpha_budget`, so the expected false alarms are bounded.
+            let alpha = self.effective_alpha(rule, spent_alpha);
+            if self.sequential.is_some() && alpha > 0.0 {
+                outcome.spends.push(RuleSpend {
+                    rule_id: rule.id.clone(),
+                    alpha,
+                });
+            }
+            if f64::from(report.combined_p_value) >= alpha {
+                // Not significant at this look's level. When the budget is
+                // exhausted `alpha` is 0, so the rule can never fire.
                 continue;
             }
             if self.in_cooldown(rule, last_fired, now) {
@@ -118,9 +206,25 @@ impl AlertEngine {
             for channel in &rule.channels {
                 self.fire_channel(channel, &event).await;
             }
-            events.push(event);
+            outcome.events.push(event);
         }
-        events
+        outcome
+    }
+
+    /// Testing level for one look at `rule`. Without sequential control this is
+    /// the rule's `target_fpr`. With it, the level is capped by the budget left
+    /// in the window — `min(target_fpr, alpha_budget − spent)`, never negative —
+    /// so a rule with no remaining budget is tested at level 0 (silenced).
+    fn effective_alpha(&self, rule: &AlertRule, spent_alpha: &HashMap<AlertRuleId, f64>) -> f64 {
+        let target = f64::from(rule.target_fpr);
+        match self.sequential {
+            None => target,
+            Some(seq) => {
+                let spent = spent_alpha.get(&rule.id).copied().unwrap_or(0.0);
+                let remaining = (seq.alpha_budget - spent).max(0.0);
+                target.min(remaining)
+            }
+        }
     }
 
     /// Whether `rule` is inside its cooldown window at `now` (its last fire was
@@ -138,13 +242,6 @@ impl AlertEngine {
         last_fired
             .get(&rule.id)
             .is_some_and(|&last| now - last < self.cooldown)
-    }
-
-    /// Returns `true` if the run's calibrated p-value clears the rule's target
-    /// false-positive rate (i.e. the drift is statistically significant at the
-    /// operator's chosen FPR).
-    fn is_triggered(report: &DriftReport, rule: &AlertRule) -> bool {
-        report.combined_p_value < rule.target_fpr
     }
 
     /// Send a notification for `event` to `channel`, logging on failure.
@@ -326,6 +423,11 @@ mod tests {
         HashMap::new()
     }
 
+    /// Empty spend ledger: no rule has spent any alpha this window.
+    fn no_spend() -> HashMap<AlertRuleId, f64> {
+        HashMap::new()
+    }
+
     fn make_rule(target_fpr: f32, active: bool) -> AlertRule {
         AlertRule {
             id: AlertRuleId::new(),
@@ -340,7 +442,10 @@ mod tests {
     async fn no_rules_returns_empty_events() {
         let engine = AlertEngine::default();
         let report = make_report(0.001);
-        let events = engine.evaluate_and_fire(&report, &[], &no_history()).await;
+        let events = engine
+            .evaluate_and_fire(&report, &[], &no_history(), &no_spend())
+            .await
+            .events;
         assert!(events.is_empty());
     }
 
@@ -350,8 +455,9 @@ mod tests {
         let report = make_report(0.0001); // very significant
         let rule = make_rule(0.01, false);
         let events = engine
-            .evaluate_and_fire(&report, &[rule], &no_history())
-            .await;
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
+            .await
+            .events;
         assert!(events.is_empty());
     }
 
@@ -361,8 +467,9 @@ mod tests {
         let report = make_report(0.001); // p < target_fpr
         let rule = make_rule(0.01, true);
         let events = engine
-            .evaluate_and_fire(&report, &[rule], &no_history())
-            .await;
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
+            .await
+            .events;
         assert_eq!(events.len(), 1);
         assert!(!events[0].acknowledged);
     }
@@ -373,8 +480,9 @@ mod tests {
         let report = make_report(0.4); // not significant
         let rule = make_rule(0.01, true);
         let events = engine
-            .evaluate_and_fire(&report, &[rule], &no_history())
-            .await;
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
+            .await
+            .events;
         assert!(events.is_empty());
     }
 
@@ -385,8 +493,9 @@ mod tests {
         let rule = make_rule(0.01, true);
         let rule_id = rule.id.clone();
         let events = engine
-            .evaluate_and_fire(&report, &[rule], &no_history())
-            .await;
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
+            .await
+            .events;
         assert_eq!(events[0].rule_id, rule_id);
     }
 
@@ -417,7 +526,7 @@ mod tests {
             active: true,
         };
         engine
-            .evaluate_and_fire(&report, &[rule], &no_history())
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
             .await;
         // wiremock verifies the expectation on drop
     }
@@ -433,8 +542,9 @@ mod tests {
         let mut last_fired = HashMap::new();
         last_fired.insert(rule.id.clone(), Utc::now() - Duration::minutes(1));
         let events = engine
-            .evaluate_and_fire(&report, &[rule], &last_fired)
-            .await;
+            .evaluate_and_fire(&report, &[rule], &last_fired, &no_spend())
+            .await
+            .events;
         assert!(
             events.is_empty(),
             "alert should be de-duplicated within cooldown"
@@ -450,8 +560,9 @@ mod tests {
         let mut last_fired = HashMap::new();
         last_fired.insert(rule.id.clone(), Utc::now() - Duration::hours(2));
         let events = engine
-            .evaluate_and_fire(&report, &[rule], &last_fired)
-            .await;
+            .evaluate_and_fire(&report, &[rule], &last_fired, &no_spend())
+            .await
+            .events;
         assert_eq!(
             events.len(),
             1,
@@ -467,8 +578,9 @@ mod tests {
         let mut last_fired = HashMap::new();
         last_fired.insert(rule.id.clone(), Utc::now()); // fired "just now"
         let events = engine
-            .evaluate_and_fire(&report, &[rule], &last_fired)
-            .await;
+            .evaluate_and_fire(&report, &[rule], &last_fired, &no_spend())
+            .await
+            .events;
         assert_eq!(events.len(), 1, "disabled cooldown must not suppress");
     }
 
@@ -581,9 +693,122 @@ mod tests {
         };
         // Event is still produced (drift happened); only delivery is suppressed.
         let events = engine
-            .evaluate_and_fire(&report, &[rule], &no_history())
-            .await;
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
+            .await
+            .events;
         assert_eq!(events.len(), 1);
         // wiremock asserts .expect(0) on drop.
+    }
+
+    // ── Sequential control / alpha-spending ───────────────────────────────────
+
+    /// A control over the configured default window with the given per-rule
+    /// budget. The window length is irrelevant to the engine (only the store's
+    /// pruning consults it), so it is sourced from the SSOT default rather than
+    /// a magic literal.
+    fn seq(alpha_budget: f64) -> SequentialControl {
+        let window_secs =
+            i64::try_from(modelsentry_common::constants::alerts::SEQUENTIAL_WINDOW_SECS)
+                .unwrap_or(i64::MAX);
+        SequentialControl {
+            window: Duration::seconds(window_secs),
+            alpha_budget,
+        }
+    }
+
+    #[tokio::test]
+    async fn sequential_disabled_records_no_spend() {
+        let engine = AlertEngine::default(); // no sequential control
+        let report = make_report(0.0001);
+        let rule = make_rule(0.01, true);
+        let outcome = engine
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
+            .await;
+        assert_eq!(outcome.events.len(), 1);
+        assert!(outcome.spends.is_empty(), "disabled control must not spend");
+    }
+
+    #[tokio::test]
+    async fn sequential_fires_and_debits_within_budget() {
+        let engine = AlertEngine::default().with_sequential(Some(seq(0.05)));
+        let rule = make_rule(0.01, true);
+        let report = make_report(0.0001); // clears target_fpr
+        let outcome = engine
+            .evaluate_and_fire(
+                &report,
+                std::slice::from_ref(&rule),
+                &no_history(),
+                &no_spend(),
+            )
+            .await;
+        assert_eq!(outcome.events.len(), 1);
+        assert_eq!(outcome.spends.len(), 1);
+        assert_eq!(outcome.spends[0].rule_id, rule.id);
+        // A full-sensitivity look spends exactly target_fpr.
+        assert!((outcome.spends[0].alpha - 0.01).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn sequential_debits_every_look_even_when_not_triggered() {
+        let engine = AlertEngine::default().with_sequential(Some(seq(0.05)));
+        let report = make_report(0.4); // p above target_fpr → does not fire
+        let rule = make_rule(0.01, true);
+        let outcome = engine
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
+            .await;
+        assert!(outcome.events.is_empty(), "p above level must not fire");
+        // Looking at the data spends alpha whether or not it fired.
+        assert_eq!(outcome.spends.len(), 1);
+        assert!((outcome.spends[0].alpha - 0.01).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn sequential_exhausted_budget_silences_rule() {
+        let engine = AlertEngine::default().with_sequential(Some(seq(0.05)));
+        let report = make_report(0.0001); // extremely significant
+        let rule = make_rule(0.01, true);
+        // The window's budget is already fully spent.
+        let mut spent = HashMap::new();
+        spent.insert(rule.id.clone(), 0.05);
+        let outcome = engine
+            .evaluate_and_fire(&report, &[rule], &no_history(), &spent)
+            .await;
+        assert!(outcome.events.is_empty(), "no budget ⇒ cannot fire");
+        assert!(
+            outcome.spends.is_empty(),
+            "an exhausted budget spends nothing further"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequential_caps_alpha_to_remaining_budget() {
+        let engine = AlertEngine::default().with_sequential(Some(seq(0.05)));
+        let rule = make_rule(0.01, true);
+        // Only 0.004 of budget remains — below the nominal target_fpr of 0.01.
+        let mut spent = HashMap::new();
+        spent.insert(rule.id.clone(), 0.046);
+        // p = 0.005 clears target_fpr (0.01) but NOT the budget-capped 0.004.
+        let report = make_report(0.005);
+        let outcome = engine
+            .evaluate_and_fire(&report, &[rule], &no_history(), &spent)
+            .await;
+        assert!(
+            outcome.events.is_empty(),
+            "p must clear the budget-capped level, not the nominal target_fpr"
+        );
+        assert!((outcome.spends[0].alpha - 0.004).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn sequential_with_zero_budget_is_disabled() {
+        // A control with a non-positive budget is treated as off by the builder.
+        let engine = AlertEngine::default().with_sequential(Some(seq(0.0)));
+        let report = make_report(0.0001);
+        let rule = make_rule(0.01, true);
+        let outcome = engine
+            .evaluate_and_fire(&report, &[rule], &no_history(), &no_spend())
+            .await;
+        assert_eq!(outcome.events.len(), 1, "zero budget ⇒ control disabled");
+        assert!(outcome.spends.is_empty());
     }
 }

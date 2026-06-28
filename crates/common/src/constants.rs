@@ -70,6 +70,10 @@ pub mod table {
     /// Per-probe scheduler state (the next scheduled run time), so the daemon
     /// resumes each probe's cadence across restarts instead of re-phasing it.
     pub const SCHEDULE_STATE: &str = "schedule_state";
+    /// Per-rule alpha-spend ledger backing the rolling-window sequential
+    /// control: one entry per look, summed within the window to enforce the
+    /// false-alarm budget.
+    pub const ALERT_SPEND: &str = "alert_spend";
 }
 
 /// HTTP header names for the daemon's own API.
@@ -199,6 +203,17 @@ pub mod alerts {
     /// Default minimum seconds between alert notifications for one rule
     /// (de-duplication / cooldown window). One hour. `0` disables.
     pub const COOLDOWN_SECS: u64 = 3600;
+
+    /// Default rolling window for the sequential-control / alpha-spending
+    /// false-alarm budget, in seconds. Thirty days. Only consulted when
+    /// `[alerts.sequential]` is present.
+    pub const SEQUENTIAL_WINDOW_SECS: u64 = 2_592_000;
+
+    /// Default per-rule alpha budget spent over one [`SEQUENTIAL_WINDOW_SECS`]
+    /// window: the bound on the **expected number of false alarms** per rule
+    /// per window. Only consulted when `[alerts.sequential]` is present; `0`
+    /// disables the control even when the block is present.
+    pub const SEQUENTIAL_ALPHA_BUDGET: f32 = 0.05;
 
     /// Default SMTP submission port (RFC 6409 STARTTLS submission).
     pub const SMTP_PORT: u16 = 587;

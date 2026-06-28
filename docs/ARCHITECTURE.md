@@ -88,11 +88,12 @@ modelsentry/
 │   │       ├── drift/
 │   │       │   ├── mod.rs        ← Embedding newtype (validated, finite)
 │   │       │   ├── twosample.rs  ← MMD² (RBF/median), energy distance, permutation test
-│   │       │   ├── assessment.rs ← per-prompt conformal + Šidák + pooled fallback + severity
+│   │       │   ├── assessment.rs ← per-prompt conformal + stratified permutation gate + pooled fallback + severity
 │   │       │   ├── calculator.rs ← DriftCalculator::compute() → DriftReport
 │   │       │   └── interpret.rs  ← honest statistical-verdict interpretation
 │   │       ├── probe_runner.rs ← ProbeRunner struct
-│   │       └── alert.rs        ← AlertEngine, webhook firing
+│   │       ├── alert.rs        ← AlertEngine, webhook firing, cooldown + alpha-spending
+│   │       └── email.rs        ← EmailMailer (SMTP, lettre)
 │   │
 │   ├── store/                  ← persistence layer (redb)
 │   │   ├── Cargo.toml
@@ -102,7 +103,8 @@ modelsentry/
 │   │       ├── baseline_store.rs
 │   │       ├── run_store.rs
 │   │       ├── alert_store.rs
-│   │       └── schedule_store.rs ← per-probe next-run state (restart catch-up)
+│   │       ├── schedule_store.rs ← per-probe next-run state (restart catch-up)
+│   │       └── spend_store.rs    ← per-rule alpha-spend ledger (sequential control)
 │   │
 │   ├── daemon/                 ← binary: tokio runtime, scheduler, REST API
 │   │   ├── Cargo.toml
@@ -354,9 +356,13 @@ path = ".modelsentry/store.redb"
 default_interval_minutes = 60
 
 [alerts]
-target_fpr = 0.01            # calibrated false-positive rate; alert when p < this
+target_fpr = 0.01            # per-run calibrated false-positive rate; alert when p < this
 baseline_capture_runs = 20   # recent runs aggregated into a baseline capture
 permutations = 200           # pooled-fallback permutation count
+cooldown_secs = 3600         # de-dup window: silence repeat alerts for one rule
+# [alerts.sequential]        # optional sequential control (alpha-spending); off by default
+# window_secs = 2592000      # rolling window (30 days)
+# alpha_budget = 0.05        # bound on expected false alarms per rule per window
 
 [providers.openai]
 model = "gpt-5.4"
@@ -421,7 +427,8 @@ enabled = false
   - Permutation test: the null p-value is (approximately) uniform on `[0, 1]`,
     so thresholding at α gives FPR ≈ α (FPR-calibration test)
   - Conformal p-value: rank-valid and bounded below by `1/(cloud_size + 1)`
-  - Šidák combination: monotone in the minimum per-prompt p-value
+  - Stratified permutation gate: combined p is monotone in `T = Σ max(zᵢ, 0)`
+    and resolves to `1/(B+1)` (auto-raising `B` to reach `target_fpr`)
   - Centroid: dimension preservation
 
 ### Benchmarks (criterion)

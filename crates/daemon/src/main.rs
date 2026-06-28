@@ -13,7 +13,7 @@ use clap::Parser;
 use modelsentry_common::config::AppConfig;
 use modelsentry_common::constants::credential::SMTP_PASSWORD;
 use modelsentry_core::{
-    alert::AlertEngine,
+    alert::{AlertEngine, SequentialControl},
     drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
     email::EmailMailer,
 };
@@ -121,6 +121,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .unwrap_or_else(chrono::Duration::zero);
 
+    // Sequential control (rolling-window alpha-spending). Absent or a
+    // non-positive budget ⇒ disabled (every run tested independently at
+    // target_fpr). An out-of-range window falls back to "no control" rather
+    // than panicking.
+    let sequential = config.alerts.sequential.as_ref().and_then(|seq| {
+        let window =
+            chrono::Duration::try_seconds(i64::try_from(seq.window_secs).unwrap_or(i64::MAX))?;
+        (seq.alpha_budget > 0.0 && window > chrono::Duration::zero()).then(|| SequentialControl {
+            window,
+            alpha_budget: f64::from(seq.alpha_budget),
+        })
+    });
+
     // Email channel: build the SMTP mailer once, pulling the password from the
     // vault. A misconfigured block disables email (logged) instead of aborting
     // startup — webhook/Slack alerts still work.
@@ -145,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         AlertEngine::new(http_client)
             .with_allow_private_targets(config.alerts.allow_private_webhook_targets)
             .with_cooldown(alert_cooldown)
+            .with_sequential(sequential)
             .with_mailer(mailer),
     );
 

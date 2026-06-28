@@ -9,3 +9,6 @@ web/build/
 .env
 .modelsentry/
 *.log
+
+# Claude Code local (personal) settings
+.claude/settings.local.json

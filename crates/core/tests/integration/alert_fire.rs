@@ -64,8 +64,14 @@ async fn webhook_receives_correct_payload_on_drift_event() {
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine
-        .evaluate_and_fire(&report, &[rule], &std::collections::HashMap::new())
-        .await;
+        .evaluate_and_fire(
+            &report,
+            &[rule],
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .events;
 
     assert_eq!(events.len(), 1, "one alert event should have been fired");
     let event = &events[0];
@@ -97,8 +103,14 @@ async fn inactive_rule_does_not_fire_webhook() {
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine
-        .evaluate_and_fire(&report, &[rule], &std::collections::HashMap::new())
-        .await;
+        .evaluate_and_fire(
+            &report,
+            &[rule],
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .events;
 
     assert!(events.is_empty(), "inactive rule should produce no events");
 
@@ -125,8 +137,14 @@ async fn below_threshold_report_does_not_fire_webhook() {
 
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events = engine
-        .evaluate_and_fire(&report, &[rule], &std::collections::HashMap::new())
-        .await;
+        .evaluate_and_fire(
+            &report,
+            &[rule],
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .events;
 
     assert!(
         events.is_empty(),
@@ -156,8 +174,14 @@ async fn webhook_payload_contains_required_fields() {
     let report = make_report(0.002, DriftLevel::Medium);
     let engine = AlertEngine::new(reqwest::Client::new()).with_allow_private_targets(true);
     let events: Vec<AlertEvent> = engine
-        .evaluate_and_fire(&report, &[rule], &std::collections::HashMap::new())
-        .await;
+        .evaluate_and_fire(
+            &report,
+            &[rule],
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .events;
 
     assert_eq!(events.len(), 1);
     let event = &events[0];

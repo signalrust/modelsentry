@@ -141,6 +141,14 @@ modelsentry alert create \
 When a run's calibrated combined p-value falls below `target_fpr`, the webhook
 fires with a JSON payload containing the full `DriftReport`.
 
+`target_fpr` is a **per-run** rate, so over many scheduled runs false alarms
+accumulate. Two optional controls bound that: `[alerts] cooldown_secs` de-dups
+repeat alerts for a rule (noise), and `[alerts.sequential]` (`window_secs`,
+`alpha_budget`) applies **alpha-spending** to bound the *expected number of false
+alarms per rule per rolling window* (error rate) — the formal sequential
+guarantee. The latter is off by default; see
+[methodology §11](docs/DRIFT_DETECTION_METHODOLOGY.md#11-sequential).
+
 ---
 
 ## How It Works
@@ -182,7 +190,8 @@ below your target FPR (α):
 | `Critical` | `p < α/1000` |
 
 Configure the single knob — and a richer baseline for more power — under
-`[alerts]` (`target_fpr`, `baseline_capture_runs`); see
+`[alerts]` (`target_fpr`, `baseline_capture_runs`, `cooldown_secs`, and the
+optional `[alerts.sequential]` alpha-spending budget); see
 [`docs/THRESHOLD_TUNING.md`](docs/THRESHOLD_TUNING.md).
 
 ---

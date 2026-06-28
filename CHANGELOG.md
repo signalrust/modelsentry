@@ -8,6 +8,20 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ### Added
 
+- **Sequential control — rolling-window alpha-spending.** New optional
+  `[alerts.sequential]` block (`window_secs`, `alpha_budget`) bounds the
+  **expected number of false alarms per rule per window**, the true sequential
+  guarantee the per-rule cooldown could not give. `target_fpr` is a per-run
+  rate, so an hourly probe at FPR 0.01 expects ~7 false alarms/month even with
+  no drift; with this control each rule spends its testing level from a per-window
+  budget on **every look** (debit-on-look), tested at
+  `min(target_fpr, budget − spent)`, and is silenced once the rolling spend
+  reaches `alpha_budget` until older spends age out. Spends are persisted to a
+  new `alert_spend` redb table (pruned past the window) so the budget spans runs
+  and restarts. Disabled by default (omit the block); orthogonal to and composes
+  with `cooldown_secs`. (`crates/core/src/alert.rs` `SequentialControl`,
+  `crates/store/src/spend_store.rs` `AlphaSpendStore`,
+  `crates/daemon/src/scheduler.rs`)
 - **Scheduler restart durability (catch-up).** Each probe's next-run time is now
   persisted (`schedule_state` redb table), so a restart resumes every probe's
   cadence instead of re-phasing it to "one interval from process start". A probe

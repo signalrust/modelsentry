@@ -67,6 +67,23 @@ samples_per_prompt = 3
 cooldown_secs = 3600
 
 # --------------------------------------------------------------------------
+# Sequential control (rolling-window alpha-spending). Optional — omit this
+# whole block to disable it (the default): every run is then tested
+# independently at target_fpr, so the EXPECTED COUNT of false alarms grows with
+# the number of scheduled runs (an hourly probe at FPR 0.01 expects ~7 false
+# alarms/month even with no drift). With this block, each rule spends its
+# testing level from a per-window budget on every look (debit-on-look); once the
+# rolling spend reaches `alpha_budget` the rule is silenced until older spends
+# age out. This bounds the expected false alarms per rule per window — at the
+# cost of per-look sensitivity, so size `alpha_budget` against the probe cadence
+# (≈ alpha_budget / target_fpr full-sensitivity looks per window). Orthogonal to
+# cooldown_secs (cooldown de-dups bursts; this bounds the long-run count).
+# --------------------------------------------------------------------------
+# [alerts.sequential]
+# window_secs = 2592000   # rolling window; 2592000 = 30 days
+# alpha_budget = 0.05     # expected false alarms tolerated per rule per window; 0 disables
+
+# --------------------------------------------------------------------------
 # Email alert channel (SMTP). Optional — omit this whole block to log-and-skip
 # email alerts. The password is stored in the encrypted vault under the 'smtp'
 # key (e.g. `modelsentry vault set smtp`), never in this file.

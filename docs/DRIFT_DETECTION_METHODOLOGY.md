@@ -26,9 +26,10 @@ background. Every term is defined the first time it appears and again in the
 8. [Combining evidence across prompts: a stratified permutation gate](#8-combining)
 9. [Turning a p-value into a severity](#9-severity)
 10. [Statistical power and why baselines should span many runs](#10-power)
-11. [Putting it together: the full pipeline](#11-pipeline)
-12. [Glossary](#glossary)
-13. [References and further reading](#references)
+11. [Controlling false alarms over many runs (sequential control)](#11-sequential)
+12. [Putting it together: the full pipeline](#12-pipeline)
+13. [Glossary](#glossary)
+14. [References and further reading](#references)
 
 ---
 
@@ -407,8 +408,68 @@ much baseline data you give it — capture more runs to detect subtler drift.
 
 ---
 
-<a name="11-pipeline"></a>
-## 11. Putting it together: the full pipeline
+<a name="11-sequential"></a>
+## 11. Controlling false alarms over many runs (sequential control)
+
+Everything up to §9 calibrates a **single** run: alert when `combined_p < α`, and
+under no drift that fires with probability `α` (e.g. 1%). But ModelSentry runs a
+probe **on a schedule**, so each rule is tested over and over. `α` is a *per-run*
+rate, and false alarms accumulate:
+
+> If a probe runs hourly at `α = 0.01`, that is ~720 independent tests a month.
+> The expected number of false alarms is `720 × 0.01 ≈ 7.2 per month` **even when
+> nothing has drifted.** Looking more often makes it worse. This is the classic
+> *multiple-looks* (multiple-comparisons-over-time) problem.
+
+Two distinct tools address two distinct failure modes:
+
+- **Cooldown (de-duplication).** A rule that fires keeps quiet for
+  `cooldown_secs` afterward. This collapses a *burst* — a genuinely drifted (or
+  chronically noisy) probe re-alerting every run — into one notification. It does
+  **not** bound the count of *independent* false alarms across a month, because
+  each alarm resets the same short window. Cooldown is about **noise**, not
+  **error rate**.
+
+- **Sequential control (alpha-spending).** This is the actual error-rate bound.
+  Configure `[alerts.sequential]` with a rolling `window_secs` and an
+  `alpha_budget`. The budget is the **expected number of false alarms tolerated
+  per rule per window** (e.g. 0.05 over 30 days). Each *look* at the data spends
+  its testing level from the budget — **debit-on-look**, not debit-on-fire,
+  because the textbook quantity is
+
+  ```
+  E[# false alarms in the window] = Σ over looks of P(fire | no drift)
+                                   = Σ over looks of (level of that look).
+  ```
+
+  So bounding that sum *is* bounding the expected false alarms. Concretely, each
+  run a rule is tested at `α_run = min(target_fpr, alpha_budget − spent)` and
+  `α_run` is debited from the window's budget. The per-window spend telescopes to
+  exactly `alpha_budget`; once it is exhausted the rule is tested at level 0
+  (silenced) until older spends age out of the rolling window.
+
+**The honest trade-off.** You cannot look arbitrarily often *and* keep the
+expected false-alarm count low *and* keep per-look sensitivity high — something
+must give, and alpha-spending makes the cost explicit. A budget of `alpha_budget`
+buys roughly `alpha_budget / target_fpr` full-sensitivity looks per window (e.g.
+`0.05 / 0.01 = 5`); beyond that the rule goes quiet until the window rolls
+forward. **Size the budget against the probe's cadence** — a daily probe spends
+its budget far more slowly than an hourly one. Because the cost is real, the
+control ships **disabled by default** (omit the block); it is the formal
+guarantee you turn on when "how many times did this rule cry wolf this month?"
+must have a provable answer.
+
+**What it is not.** This bounds the *count* of false alarms (an FWER-style
+guarantee), not the *proportion* of alarms that are false (FDR). A real drift
+episode spends budget too, so after a true incident a rule can fall silent for
+the rest of the window — by design. The spend ledger is persisted (a per-rule,
+time-keyed redb table, pruned past the window), so the budget is honored across
+daemon restarts, not just within one process.
+
+---
+
+<a name="12-pipeline"></a>
+## 12. Putting it together: the full pipeline
 
 ```
                     ┌──────────────── BASELINE (trusted) ────────────────┐
@@ -424,7 +485,9 @@ much baseline data you give it — capture more runs to detect subtler drift.
      4. Gate: stratified permutation test of T = Σ max(zᵢ,0) → combined_p.
         (If baseline clouds are too small → pooled MMD/energy permutation test.)
      5. Severity from combined_p vs target_fpr.
-     6. Alert if combined_p < target_fpr. Fire webhook/Slack with the verdict.
+     6. Alert if combined_p < α_run, where α_run = target_fpr (capped by the
+        remaining alpha-spending budget when [alerts.sequential] is on, §11).
+        Fire webhook/Slack/email; cooldown de-dups bursts within its window.
      7. Store the assessment (statistic, p-value, per-prompt breakdown, method).
 ```
 
@@ -434,7 +497,7 @@ which is what makes the result *defensible*, not just *plausible*.
 ---
 
 <a name="glossary"></a>
-## 12. Glossary
+## 13. Glossary
 
 - **Alpha (α) / target FPR.** The false-positive rate you choose. Alert when
   `p < α`. Smaller α = fewer false alarms but also less sensitivity.
@@ -506,7 +569,7 @@ which is what makes the result *defensible*, not just *plausible*.
 ---
 
 <a name="references"></a>
-## 13. References and further reading
+## 14. References and further reading
 
 - A. Gretton, K. Borgwardt, M. Rasch, B. Schölkopf, A. Smola. **"A Kernel
   Two-Sample Test."** *Journal of Machine Learning Research*, 2012. — MMD and the

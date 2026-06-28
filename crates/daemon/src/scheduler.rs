@@ -354,11 +354,39 @@ async fn run_probe_job(
                             last_fired.insert(rule.id.clone(), at);
                         }
                     }
-                    let events = alert_engine
-                        .evaluate_and_fire(&report, &rules, &last_fired)
+                    // Sequential control: load each rule's alpha already spent
+                    // inside the current window, so the engine can cap this
+                    // run's testing level against the remaining budget.
+                    let mut spent_alpha = HashMap::new();
+                    if let Some(window) = alert_engine.sequential_window() {
+                        let since = Utc::now() - window;
+                        for rule in &rules {
+                            let spent = store.spends().spent_since(&rule.id, since)?;
+                            if spent > 0.0 {
+                                spent_alpha.insert(rule.id.clone(), spent);
+                            }
+                        }
+                    }
+                    let outcome = alert_engine
+                        .evaluate_and_fire(&report, &rules, &last_fired, &spent_alpha)
                         .await;
-                    for event in &events {
+                    for event in &outcome.events {
                         store.alerts().insert_event(event)?;
+                    }
+                    // Persist this run's alpha debits so the budget spans runs
+                    // and restarts; prune spends that have aged out of the
+                    // window to keep the ledger bounded.
+                    if let Some(window) = alert_engine.sequential_window() {
+                        let now = Utc::now();
+                        let prune_before = now - window;
+                        for spend in &outcome.spends {
+                            store.spends().record_spend(
+                                &spend.rule_id,
+                                now,
+                                spend.alpha,
+                                prune_before,
+                            )?;
+                        }
                     }
                     run.drift_report = Some(report);
                 }

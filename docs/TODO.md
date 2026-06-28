@@ -4,7 +4,7 @@ Status snapshot after the provider-unification + calibrated-drift rebuild
 (`b5462d2`), per-prompt multi-sampling (`7beabae`), and the
 email/cooldown/scheduler-persistence/effect-size/baseline-health batch (in the
 working tree as of this audit — **verified green: `cargo fmt --check` clean,
-`clippy -D warnings` clean, `cargo test --workspace` = 216 pass / 0 fail**).
+`clippy -D warnings` clean, `cargo test --workspace` = 225 pass / 0 fail**).
 
 **Priority legend.** **P1/Blocking** = a competent UI-only user cannot complete
 the core loop (configure → probe → baseline → drift → alert) without it.
@@ -49,6 +49,18 @@ the core loop (configure → probe → baseline → drift → alert) without it.
   `lettre` (rustls); `[alerts.smtp]` config + vault-held password; mailer built
   once at startup, misconfig disables email without aborting.
   (`crates/core/src/email.rs` — `EmailMailer`, TLS/STARTTLS/plaintext, 4 tests.)
+- **Sequential control — rolling-window alpha-spending.** *(P2 statistical rigor
+  — the headline calibration remainder, now shipped.)* Optional
+  `[alerts.sequential]` (`window_secs`, `alpha_budget`) bounds the **expected
+  number of false alarms per rule per window** — the guarantee the per-rule
+  cooldown could not give. Each look spends `min(target_fpr, budget − spent)`
+  from the window budget (debit-on-look, so `Σ levels = E[false alarms] ≤
+  alpha_budget`); the rule is silenced once exhausted until spends age out.
+  Spends persist in a new `alert_spend` redb table (pruned past the window), so
+  the budget spans runs and restarts. Disabled by default; composes with
+  cooldown. (`crates/core/src/alert.rs` `SequentialControl`/`AlertOutcome`,
+  `crates/store/src/spend_store.rs` `AlphaSpendStore`, wired in `main.rs` +
+  `scheduler.rs`; methodology §11.) Residual is dashboard-only (P2-UX).
 - **Alert cooldown / de-duplication.** `[alerts] cooldown_secs` (default 3600)
   de-dups repeat notifications per rule (run still recorded). Engine takes a
   store-loaded last-fired map; the per-run vs per-period distinction is documented.
@@ -80,12 +92,15 @@ the core loop (configure → probe → baseline → drift → alert) without it.
 - **Graceful shutdown.** Ctrl+C / SIGTERM drains the HTTP server
   (`server.rs:177` `with_graceful_shutdown`) then stops the scheduler
   (`main.rs:196`).
-- **Šidák references scrubbed** from docs. *(was P3 — verified done this audit;)*
-  no `Šidák/Sidak` matches remain in `docs/` or `README.md`.
+- **Stale Šidák references scrubbed** from the code-describing docs. *(was P3.)*
+  No doc describes the *current* gate as Šidák — ARCHITECTURE's module/test notes
+  now say "stratified permutation gate". The methodology **intentionally** retains
+  Šidák in its "why we replaced it" discussion, glossary, and citations; those are
+  historical/reference, not a description of current behavior.
 - Docs refreshed (README, ARCHITECTURE, methodology §8, CHANGELOG, config).
 - Verification this audit: `clippy -D warnings` clean; `cargo fmt --check` clean;
-  `cargo test --workspace` **216 pass / 0 fail** (core 97, daemon 50, cli 41,
-  store 18, common 10).
+  `cargo test --workspace` **225 pass / 0 fail** (core 113 incl. 10 integration,
+  daemon 50, common 41, store 21, cli 0).
 
 ---
 
@@ -117,13 +132,13 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
 
 ## P2 — Statistical rigor (path to a 9–10 calibration story)
 
-- [ ] **Sequential control — alpha-spending + UI (the substantive remainder).**
-      Backend cooldown / de-duplication is **shipped** (`[alerts] cooldown_secs`,
-      `alert.rs:64-140`). Still open, and this is the harder half:
-      (1) surface the per-run vs per-period distinction in the dashboard, and
-      (2) a true **alpha-spending** control. The cooldown de-dups bursts; it does
-      **not** bound the count of *independent* false alarms over a month, which is
-      what a calibration referee will ask for.
+- [ ] **Sequential control — dashboard surfacing (the UI remainder).** The
+      **backend alpha-spending control is shipped** (see Done): `[alerts.sequential]`
+      (`window_secs`, `alpha_budget`) bounds the expected false alarms per rule per
+      rolling window via debit-on-look, persisted in the `alert_spend` table. What
+      remains is **dashboard-only**: surface the per-run vs per-period distinction
+      and show each rule's remaining budget / spend ("0.03 of 0.05 spent this
+      window"). No further backend work needed for the guarantee itself.
 - [ ] **Effect-size *direction* (optional follow-up).** The **magnitude** half
       (`DriftReport.effect_size`, in null SDs) is **done** (see Done). Remaining is
       only the optional extra: report a *direction* in embedding space, not just
@@ -166,7 +181,7 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
       the browser calls `:7740` directly (CORS). Correct the wording.
 - [ ] **Release checklist + test counts.** Reconcile
       `docs/RELEASE_READINESS_CHECKLIST.md` and any stale counts before tagging —
-      the current suite is **216** tests (this doc previously said 200).
+      the current suite is **225** tests (this doc previously said 200).
 - [ ] **Track `proc-macro-error2` (unmaintained).** Transitive via `tabled`/`age`;
       not a CVE, allowed by `cargo audit`. Revisit on upstream upgrades.
 - [ ] **No-magic-values sweep (frontend).** Audit remaining inline literals in
@@ -200,7 +215,8 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
 - ~~Baseline-health warning~~ — **done** (P2). Surfaced in the verdict text;
   residual structured-badge polish moved to P2-UX.
 - ~~f64 kernel/statistic sums~~ — **done** (P2).
-- ~~Stale Šidák references~~ — **done** (P3); none remain in docs.
+- ~~Stale Šidák references~~ — **done** (P3); no doc describes the *current* gate
+  as Šidák (methodology keeps it only as historical/citation context).
 
 ## Honesty / scoping (fix the *copy*, not just the code)
 
@@ -223,10 +239,10 @@ These are positioning corrections a referee/buyer would catch — keep claims ti
 | Dimension | Score | Note |
 |---|---|---|
 | Statistical method (design) | 8/10 | Correct conformal + MMD/energy + permutation; right tools for n≪d. |
-| Statistical method (calibration) | 8/10 | Stratified-permutation gate + per-prompt multi-sampling; empirically calibrated; f64 sums + baseline-health done. Residual to 10: **alpha-spending / sequential control**. |
+| Statistical method (calibration) | 9/10 | Stratified-permutation gate + per-prompt multi-sampling; empirically calibrated; f64 sums + baseline-health done; **alpha-spending / sequential control now shipped** (`[alerts.sequential]`, bounds expected false alarms per rule per window). Residual to 10: dashboard surfacing of the budget (UX, not method). |
 | Architecture / design | 8/10 | Unified `ProviderSpec`, single resolver, clean layering. |
 | Code quality | 9/10 | `clippy -D warnings`, no-unwrap lint, centralized constants, real docs, f64 numeric care. |
-| Test quality | 7/10 | Validates calibration (null-FPR MC) + power; 216 tests; ~no frontend tests. |
+| Test quality | 7/10 | Validates calibration (null-FPR MC) + power; 225 tests; ~no frontend tests. |
 | Frontend | 5/10 | Good design system; **control plane still incomplete (P1)**; static LIVE badge; theme leaks. |
 | Security hygiene | 8/10 | age vault, constant-time key compare, SSRF guard, body/rate limits. |
 | Product completeness | 4/10 | Core loop still needs CLI for baseline/rule capture; onboarding friction. (Email + cooldown shipped.) |
@@ -239,7 +255,9 @@ that gate was replaced.
 
 **Path to a credible v1 (the audit's blocking set, current state):**
 1. ~~Fix default sensitivity / un-fireable detector~~ — **done.**
-2. ~~Empirical calibration test~~ — **done.** (Sequential/alpha-spending still open → P2.)
+2. ~~Empirical calibration test~~ — **done.** (Sequential/alpha-spending **now
+   also done** — `[alerts.sequential]`; only the dashboard surfacing of the
+   budget remains → P2-UX.)
 3. Honest scoping in copy → Honesty section above.
 4. **Complete the dashboard loop (baseline capture + alert rules) and live refresh
    → P1 above.** This is now the single biggest gap to a UI-usable v1.

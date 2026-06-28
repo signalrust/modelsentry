@@ -95,11 +95,50 @@ pub struct AlertsConfig {
     /// password for the SMTP channel below lives in the vault, not here.
     #[serde(default = "default_cooldown_secs")]
     pub cooldown_secs: u64,
+    /// Sequential control (rolling-window alpha-spending). Absent ⇒ disabled:
+    /// every run is tested independently at `target_fpr`, so the *expected
+    /// count* of false alarms grows with the number of scheduled runs. Present
+    /// ⇒ each rule may spend at most `alpha_budget` of testing level over a
+    /// rolling `window_secs` window, bounding the expected false alarms per
+    /// rule per window. Orthogonal to (and composes with) `cooldown_secs`.
+    #[serde(default)]
+    pub sequential: Option<SequentialConfig>,
     /// SMTP settings for the email alert channel. Absent ⇒ email alerts are
     /// logged-and-skipped; present ⇒ the daemon builds a mailer at startup. The
     /// password is read from the vault (key `smtp`), never from this file.
     #[serde(default)]
     pub smtp: Option<SmtpConfig>,
+}
+
+/// Rolling-window sequential control (alpha-spending) for one alert rule.
+///
+/// `target_fpr` is a **per-run** false-positive rate, so a probe that runs `N`
+/// times in a window racks up an expected `N · target_fpr` false alarms even
+/// with no drift. This block caps the **expected number of false alarms** per
+/// rule per window at `alpha_budget`: each look spends its testing level from
+/// the budget (debit-on-look, telescoping to exactly the budget), and once the
+/// rolling spend reaches `alpha_budget` the rule is silenced until older spends
+/// age out of the window. The trade-off is honest — bounding the false-alarm
+/// *count* costs per-look sensitivity, so size `alpha_budget` against the
+/// probe's cadence (≈ `alpha_budget / target_fpr` full-sensitivity looks per
+/// window).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SequentialConfig {
+    /// Length of the rolling window, in seconds. Defaults to 30 days.
+    #[serde(default = "default_sequential_window_secs")]
+    pub window_secs: u64,
+    /// Expected false alarms tolerated per rule per window. `0` disables the
+    /// control even when this block is present. Defaults to 0.05.
+    #[serde(default = "default_sequential_alpha_budget")]
+    pub alpha_budget: f32,
+}
+
+fn default_sequential_window_secs() -> u64 {
+    crate::constants::alerts::SEQUENTIAL_WINDOW_SECS
+}
+
+fn default_sequential_alpha_budget() -> f32 {
+    crate::constants::alerts::SEQUENTIAL_ALPHA_BUDGET
 }
 
 /// SMTP settings for the email alert channel.
@@ -171,6 +210,7 @@ impl Default for AlertsConfig {
             permutations: default_permutations(),
             samples_per_prompt: default_samples_per_prompt(),
             cooldown_secs: default_cooldown_secs(),
+            sequential: None,
             smtp: None,
         }
     }

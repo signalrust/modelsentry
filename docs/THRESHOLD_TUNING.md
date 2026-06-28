@@ -41,6 +41,21 @@ retain the **power** to detect real drift at that stricter bar (see §3).
 You can also set `target_fpr` **per probe** on an alert rule, overriding the
 global default for noisy or especially critical probes.
 
+**Note the "per run" in the table above.** `target_fpr` is a per-run rate, so
+false alarms accumulate over a schedule: an hourly probe at `0.01` expects ~7
+false alarms a month with no drift. Two optional controls bound this:
+
+- `[alerts] cooldown_secs` (default 3600) de-dups *bursts* — a rule that keeps
+  firing is silenced for the window. Good for noise; does not bound the long-run
+  count.
+- `[alerts.sequential]` (`window_secs`, `alpha_budget`, **off by default**)
+  applies **alpha-spending**: it bounds the *expected number of false alarms per
+  rule per rolling window* at `alpha_budget`. The cost is per-look sensitivity —
+  a budget buys ≈ `alpha_budget / target_fpr` full-sensitivity looks per window,
+  after which the rule goes quiet until older spends age out. Size it against the
+  probe's cadence. See
+  [methodology §11](DRIFT_DETECTION_METHODOLOGY.md#11-sequential).
+
 ---
 
 ## 2. Severity bands
