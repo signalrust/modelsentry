@@ -24,13 +24,13 @@ impl Embedding {
     /// # Errors
     ///
     /// - [`ModelSentryError::EmptyEmbedding`] if `raw` is empty.
-    /// - [`ModelSentryError::Provider`] if any value is NaN or infinite.
+    /// - [`ModelSentryError::Drift`] if any value is NaN or infinite.
     pub fn new(raw: Vec<f32>) -> Result<Self> {
         if raw.is_empty() {
             return Err(ModelSentryError::EmptyEmbedding);
         }
         if raw.iter().any(|v| !v.is_finite()) {
-            return Err(ModelSentryError::Provider {
+            return Err(ModelSentryError::Drift {
                 message: "embedding contains non-finite values (NaN or Inf)".into(),
             });
         }

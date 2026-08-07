@@ -118,6 +118,13 @@ pub struct BaselineSnapshot {
     /// Embedding model that produced the clouds (for migration & display).
     #[serde(default)]
     pub embedding_model: String,
+    /// Provider-reported model version pinned at capture (from the runs folded
+    /// in). A later run reporting a *different* version means the baseline now
+    /// describes a different model — a silent exchangeability breaker the drift
+    /// report flags. `None` when the provider reported no version. Defaulted for
+    /// baselines predating this field.
+    #[serde(default)]
+    pub model_version: Option<String>,
     /// Per-prompt output-embedding clouds: `prompt_clouds[i]` is prompt `i`'s
     /// set of completion embeddings; each inner vector is one sample.
     #[serde(default)]
@@ -175,6 +182,14 @@ pub struct ProbeRun {
     #[serde(default)]
     pub embeddings: Vec<Vec<Vec<f32>>>,
     pub completions: Vec<String>,
+    /// Provider-reported model version/identity observed during this run
+    /// (OpenAI/Azure/Ollama `model`, Anthropic `model`). Recorded so a silent
+    /// model-version change — the worst exchangeability breaker for the
+    /// conformal drift test — can be detected against the baseline's pinned
+    /// version. `None` when the provider reported none. Defaulted for runs
+    /// persisted before this field existed.
+    #[serde(default)]
+    pub model_version: Option<String>,
     pub drift_report: Option<DriftReport>,
     pub status: RunStatus,
 }
@@ -216,6 +231,13 @@ pub struct DriftReport {
     #[serde(default)]
     pub per_prompt: Vec<PromptDrift>,
     pub drift_level: DriftLevel,
+    /// `true` when the provider-reported model version on this run differs from
+    /// the version pinned at baseline capture — a silent exchangeability breaker
+    /// (the run is being compared against a different model's baseline). The
+    /// specific `before → after` versions are named in `interpretation`.
+    /// Defaulted for reports predating this field.
+    #[serde(default)]
+    pub model_version_changed: bool,
     /// Human-readable interpretation of the statistical verdict.
     #[serde(default)]
     pub interpretation: String,
@@ -349,6 +371,7 @@ mod tests {
             captured_at: Utc::now(),
             schema_version: BASELINE_SCHEMA_VERSION,
             embedding_model: "text-embedding-3-small".to_string(),
+            model_version: Some(crate::constants::defaults::openai::MODEL.to_string()),
             prompt_clouds: vec![vec![vec![0.1, 0.2, 0.3], vec![0.11, 0.19, 0.31]]],
             n_runs: 2,
             run_id: RunId::new(),
@@ -377,6 +400,7 @@ mod tests {
             finished_at: Utc::now(),
             embeddings: vec![vec![vec![0.1, 0.2]]],
             completions: vec!["hello world".to_string()],
+            model_version: None,
             drift_report: None,
             status: RunStatus::Success,
         };
@@ -418,6 +442,7 @@ mod tests {
                 method: crate::constants::method::PER_PROMPT_CONFORMAL.to_string(),
                 per_prompt: Vec::new(),
                 drift_level: DriftLevel::High,
+                model_version_changed: false,
                 interpretation: String::new(),
                 computed_at: Utc::now(),
             },

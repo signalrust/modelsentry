@@ -18,7 +18,7 @@ use modelsentry_common::{
 use modelsentry_core::{
     drift::{Embedding, assessment::AssessmentConfig, calculator::DriftCalculator},
     probe_runner::ProbeRunner,
-    provider::LlmProvider,
+    provider::{Completion, LlmProvider},
 };
 use modelsentry_store::AppStore;
 use tempfile::TempDir;
@@ -62,8 +62,11 @@ impl LlmProvider for StubProvider {
         Ok(vec![Embedding::new(self.embedding.clone())?])
     }
 
-    async fn complete(&self, _prompt: &str) -> CoreResult<String> {
-        Ok(self.completion.clone())
+    async fn complete(&self, _prompt: &str) -> CoreResult<Completion> {
+        Ok(Completion {
+            text: self.completion.clone(),
+            model_version: None,
+        })
     }
 
     fn provider_name(&self) -> &'static str {
@@ -137,6 +140,7 @@ fn jittered_baseline(
         captured_at: Utc::now(),
         schema_version: modelsentry_common::models::BASELINE_SCHEMA_VERSION,
         embedding_model: "stub".to_string(),
+        model_version: None,
         prompt_clouds,
         n_runs: k,
         run_id,
@@ -243,6 +247,7 @@ async fn delete_probe_also_deletes_associated_runs_and_baselines() {
         finished_at: Utc::now(),
         embeddings: vec![vec![vec![1.0, 0.0, 0.0]]],
         completions: vec!["hello".into()],
+        model_version: None,
         drift_report: None,
         status: RunStatus::Success,
     };
@@ -255,6 +260,7 @@ async fn delete_probe_also_deletes_associated_runs_and_baselines() {
         captured_at: Utc::now(),
         schema_version: modelsentry_common::models::BASELINE_SCHEMA_VERSION,
         embedding_model: "stub".into(),
+        model_version: None,
         prompt_clouds: vec![vec![vec![1.0, 0.0, 0.0]]],
         n_runs: 1,
         run_id: RunId::new(),

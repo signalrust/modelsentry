@@ -18,7 +18,7 @@ use modelsentry_common::{
 
 use modelsentry_common::constants::defaults;
 
-use super::LlmProvider;
+use super::{Completion, LlmProvider};
 use crate::drift::Embedding;
 
 // ── Public type ───────────────────────────────────────────────────────────────
@@ -85,6 +85,15 @@ struct MessagesRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     messages: Vec<RequestMessage<'a>>,
+    // Cache-busting (exchangeability): a fresh non-semantic nonce per request,
+    // so an exact-request cache cannot return identical completions across
+    // baseline runs (which would collapse a prompt's baseline cloud).
+    metadata: RequestMetadata<'a>,
+}
+
+#[derive(Serialize)]
+struct RequestMetadata<'a> {
+    user_id: &'a str,
 }
 
 #[derive(Serialize)]
@@ -101,6 +110,10 @@ struct MessagesResponse {
     /// Claude models) — distinct from `"end_turn"`.
     #[serde(default)]
     stop_reason: Option<String>,
+    /// Resolved model identity (a pinned snapshot id, e.g. `claude-sonnet-4-6`),
+    /// used to detect a silent model-version change since baseline capture.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -131,15 +144,20 @@ impl LlmProvider for AnthropicProvider {
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Provider`] on network or parse failure.
+    /// - [`ModelSentryError::ProviderTransport`] on a network/transport failure.
+    /// - [`ModelSentryError::ProviderDecode`] if the response cannot be decoded.
+    /// - [`ModelSentryError::Provider`] on a semantic failure (safety refusal,
+    ///   or no text content block).
     /// - [`ModelSentryError::ProviderHttp`] when the API returns a non-200
     ///   status (e.g. 429 rate-limit, 529 overloaded).
-    async fn complete(&self, prompt: &str) -> Result<String> {
+    async fn complete(&self, prompt: &str) -> Result<Completion> {
         let url = format!("{}/v1/messages", self.base_url);
 
+        let nonce = super::cache_bust_nonce();
         let request_body = MessagesRequest {
             model: &self.model,
             max_tokens: self.max_tokens,
+            metadata: RequestMetadata { user_id: &nonce },
             messages: vec![RequestMessage {
                 role: "user",
                 content: prompt,
@@ -159,8 +177,8 @@ impl LlmProvider for AnthropicProvider {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("HTTP request failed: {e}"),
+            .map_err(|e| ModelSentryError::ProviderTransport {
+                message: e.to_string(),
             })?;
 
         let status = response.status().as_u16();
@@ -173,8 +191,8 @@ impl LlmProvider for AnthropicProvider {
             response
                 .json()
                 .await
-                .map_err(|e| ModelSentryError::Provider {
-                    message: format!("failed to deserialize response: {e}"),
+                .map_err(|e| ModelSentryError::ProviderDecode {
+                    message: format!("messages response: {e}"),
                 })?;
 
         // A safety refusal returns HTTP 200 but is not a usable completion —
@@ -184,15 +202,29 @@ impl LlmProvider for AnthropicProvider {
                 message: "Anthropic declined the request (stop_reason: refusal)".into(),
             });
         }
+        // A completion truncated at the token cap is not representative of the
+        // model's full output, so it must not be folded into a baseline either.
+        if parsed.stop_reason.as_deref() == Some("max_tokens") {
+            return Err(ModelSentryError::Provider {
+                message: "completion truncated (stop_reason: max_tokens) — raise \
+                          [providers.anthropic] max_tokens or shorten the prompt"
+                    .into(),
+            });
+        }
 
-        parsed
+        let model_version = parsed.model.filter(|m| !m.is_empty());
+        let text = parsed
             .content
             .into_iter()
             .find(|b| b.block_type == "text")
             .and_then(|b| b.text)
             .ok_or_else(|| ModelSentryError::Provider {
                 message: "no text content block in Anthropic response".into(),
-            })
+            })?;
+        Ok(Completion {
+            text,
+            model_version,
+        })
     }
 
     fn provider_name(&self) -> &'static str {
@@ -229,7 +261,7 @@ mod tests {
             "type": "message",
             "role": "assistant",
             "content": [{"type": "text", "text": text}],
-            "model": "claude-sonnet-4-6",
+            "model": defaults::anthropic::MODEL,
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 10, "output_tokens": 20}
         })
@@ -248,7 +280,11 @@ mod tests {
             .complete("Say hello")
             .await
             .unwrap();
-        assert_eq!(result, "Hello!");
+        assert_eq!(result.text, "Hello!");
+        assert_eq!(
+            result.model_version.as_deref(),
+            Some(defaults::anthropic::MODEL)
+        );
     }
 
     #[tokio::test]
@@ -269,7 +305,7 @@ mod tests {
             "type": "message",
             "role": "assistant",
             "content": [],
-            "model": "claude-sonnet-4-6",
+            "model": defaults::anthropic::MODEL,
             "stop_reason": "refusal",
             "usage": {"input_tokens": 10, "output_tokens": 0}
         });
@@ -284,6 +320,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("refusal"));
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_max_tokens_truncation() {
+        let server = MockServer::start().await;
+        // HTTP 200 but the output was cut off at the token cap (stop_reason
+        // "max_tokens") — not a representative completion, so it must error.
+        let truncated = serde_json::json!({
+            "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "partial"}],
+            "model": defaults::anthropic::MODEL,
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 10, "output_tokens": 1024}
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(truncated))
+            .mount(&server)
+            .await;
+
+        let err = make_provider(&server.uri())
+            .complete("hello")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
     }
 
     #[tokio::test]
@@ -318,6 +381,22 @@ mod tests {
             .await;
 
         make_provider(&server.uri()).complete("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn complete_sends_cache_busting_metadata() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        // The mock only matches when the request carries a `metadata` object
+        // (the cache-busting user_id nonce); dropping it would 404 → panic.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(serde_json::json!({ "metadata": {} })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_response("ok")))
+            .mount(&server)
+            .await;
+
+        make_provider(&server.uri()).complete("hi").await.unwrap();
     }
 
     #[tokio::test]

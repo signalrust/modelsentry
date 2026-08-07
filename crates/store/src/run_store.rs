@@ -224,6 +224,7 @@ mod tests {
             // Two prompts, one sample each — exercises the embeddings split.
             embeddings: vec![vec![vec![1.0, 2.0]], vec![vec![3.0, 4.0]]],
             completions: vec!["ok".into()],
+            model_version: None,
             drift_report: None,
             status: RunStatus::Success,
         }

@@ -11,14 +11,13 @@ use std::sync::Arc;
 
 use clap::Parser;
 use modelsentry_common::config::AppConfig;
-use modelsentry_common::constants::credential::SMTP_PASSWORD;
+use modelsentry_common::constants::{alerts::WEBHOOK_TIMEOUT_SECS, credential::SMTP_PASSWORD};
 use modelsentry_core::{
     alert::{AlertEngine, SequentialControl},
     drift::{assessment::AssessmentConfig, calculator::DriftCalculator},
     email::EmailMailer,
 };
 use modelsentry_daemon::{
-    constants::alert::HTTP_TIMEOUT_SECS,
     provider_factory::VaultProviderResolver,
     scheduler::Scheduler,
     server::{self, AppState},
@@ -107,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Core components (shared via Arc) ───────────────────────────────────
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(WEBHOOK_TIMEOUT_SECS))
         .build()?;
     let calculator = Arc::new(DriftCalculator::new(AssessmentConfig {
         target_fpr: config.alerts.target_fpr,

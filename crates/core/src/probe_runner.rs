@@ -77,7 +77,7 @@ impl ProbeRunner {
                 let text = p.text.clone();
                 async move {
                     let _permit = sem.acquire_owned().await.map_err(|_| {
-                        modelsentry_common::error::ModelSentryError::Provider {
+                        modelsentry_common::error::ModelSentryError::Internal {
                             message: "semaphore closed".to_string(),
                         }
                     })?;
@@ -87,12 +87,18 @@ impl ProbeRunner {
                     // distribution, then embed them in a single batched call
                     // (one round-trip instead of one per sample).
                     let mut answers: Vec<String> = Vec::with_capacity(n_samples);
+                    let mut model_version: Option<String> = None;
                     for _ in 0..n_samples {
-                        let Ok(answer) = prov.complete(&text).await else {
+                        let Ok(completion) = prov.complete(&text).await else {
                             continue;
                         };
-                        if !answer.is_empty() {
-                            answers.push(answer);
+                        // First reported version wins; samples within a run come
+                        // from the same model, so this records that identity.
+                        if model_version.is_none() {
+                            model_version = completion.model_version;
+                        }
+                        if !completion.text.is_empty() {
+                            answers.push(completion.text);
                         }
                     }
                     // First usable completion is the representative for display.
@@ -108,6 +114,7 @@ impl ProbeRunner {
                     Ok::<_, modelsentry_common::error::ModelSentryError>((
                         sample_embeddings,
                         representative,
+                        model_version,
                     ))
                 }
             })
@@ -118,15 +125,21 @@ impl ProbeRunner {
         let n = outcomes.len();
         let mut embeddings = Vec::with_capacity(n);
         let mut completions = Vec::with_capacity(n);
+        let mut model_version: Option<String> = None;
         let mut failure_count: usize = 0;
 
         for outcome in outcomes {
-            let Ok((sample_embeddings, representative)) = outcome else {
+            let Ok((sample_embeddings, representative, prompt_model_version)) = outcome else {
                 failure_count += 1;
                 embeddings.push(Vec::new());
                 completions.push(String::new());
                 continue;
             };
+            // First reported version across all prompts is the run's model
+            // identity (every prompt hit the same provider/model).
+            if model_version.is_none() {
+                model_version = prompt_model_version;
+            }
             // No usable embedding or no completion ⇒ this prompt failed.
             if sample_embeddings.is_empty() || representative.is_none() {
                 failure_count += 1;
@@ -142,6 +155,7 @@ impl ProbeRunner {
             finished_at: Utc::now(),
             embeddings,
             completions,
+            model_version,
             drift_report: None,
             status: classify_status(failure_count, n),
         })
@@ -177,7 +191,7 @@ impl ProbeRunner {
                 let text = p.text.clone();
                 async move {
                     let _permit = sem.acquire_owned().await.map_err(|_| {
-                        modelsentry_common::error::ModelSentryError::Provider {
+                        modelsentry_common::error::ModelSentryError::Internal {
                             message: "semaphore closed".to_string(),
                         }
                     })?;
@@ -190,11 +204,15 @@ impl ProbeRunner {
 
         let n = outcomes.len();
         let mut completions = Vec::with_capacity(n);
+        let mut model_version: Option<String> = None;
         let mut failure_count: usize = 0;
 
         for result in outcomes {
-            if let Ok(text) = result {
-                completions.push(text);
+            if let Ok(completion) = result {
+                if model_version.is_none() {
+                    model_version = completion.model_version;
+                }
+                completions.push(completion.text);
             } else {
                 failure_count += 1;
                 completions.push(String::new());
@@ -208,6 +226,7 @@ impl ProbeRunner {
             finished_at: Utc::now(),
             embeddings: vec![Vec::new(); n],
             completions,
+            model_version,
             drift_report: None,
             status: classify_status(failure_count, n),
         })
@@ -247,7 +266,11 @@ mod tests {
 
     use super::*;
     use crate::drift::Embedding;
-    use crate::provider::LlmProvider;
+    use crate::provider::{Completion, LlmProvider};
+
+    /// Stub model identity the [`EchoProvider`] reports, so tests can assert the
+    /// runner threads the provider-reported version onto the run.
+    const ECHO_MODEL: &str = "echo-model-v1";
 
     // ── Fixture ──────────────────────────────────────────────────────────────
 
@@ -285,8 +308,11 @@ mod tests {
                 .map(|_| Embedding::new(vec![1.0, 2.0]))
                 .collect()
         }
-        async fn complete(&self, prompt: &str) -> Result<String> {
-            Ok(prompt.to_string())
+        async fn complete(&self, prompt: &str) -> Result<Completion> {
+            Ok(Completion {
+                text: prompt.to_string(),
+                model_version: Some(ECHO_MODEL.to_string()),
+            })
         }
         fn provider_name(&self) -> &'static str {
             "echo"
@@ -306,8 +332,11 @@ mod tests {
                 message: "embed unavailable".into(),
             })
         }
-        async fn complete(&self, _prompt: &str) -> Result<String> {
-            Ok("ok".into())
+        async fn complete(&self, _prompt: &str) -> Result<Completion> {
+            Ok(Completion {
+                text: "ok".into(),
+                model_version: None,
+            })
         }
         fn provider_name(&self) -> &'static str {
             "fail-embed"
@@ -334,8 +363,11 @@ mod tests {
             self.concurrent.fetch_sub(1, Ordering::SeqCst);
             texts.iter().map(|_| Embedding::new(vec![1.0])).collect()
         }
-        async fn complete(&self, _prompt: &str) -> Result<String> {
-            Ok("ok".into())
+        async fn complete(&self, _prompt: &str) -> Result<Completion> {
+            Ok(Completion {
+                text: "ok".into(),
+                model_version: None,
+            })
         }
         fn provider_name(&self) -> &'static str {
             "slow"
@@ -370,6 +402,22 @@ mod tests {
         for (i, completion) in run.completions.iter().enumerate() {
             assert_eq!(completion, &format!("prompt {i}"));
         }
+    }
+
+    #[tokio::test]
+    async fn run_records_provider_reported_model_version() {
+        let runner = ProbeRunner::new(Arc::new(EchoProvider));
+        let probe = make_test_probe(2);
+        let run = runner.run(&probe, 2, 1).await.unwrap();
+        assert_eq!(run.model_version.as_deref(), Some(ECHO_MODEL));
+    }
+
+    #[tokio::test]
+    async fn run_completions_only_records_model_version() {
+        let runner = ProbeRunner::new(Arc::new(EchoProvider));
+        let probe = make_test_probe(2);
+        let run = runner.run_completions_only(&probe, 2).await.unwrap();
+        assert_eq!(run.model_version.as_deref(), Some(ECHO_MODEL));
     }
 
     #[tokio::test]

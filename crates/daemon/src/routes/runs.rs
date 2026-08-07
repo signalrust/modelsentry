@@ -159,6 +159,7 @@ mod tests {
             finished_at: now,
             embeddings: vec![],
             completions: vec!["ok".to_string()],
+            model_version: None,
             drift_report: None,
             status: RunStatus::Success,
         }

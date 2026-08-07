@@ -122,7 +122,8 @@ api_version = "2023-06-01"
 max_tokens = 1024
 
 [providers.ollama]
-model = "llama3"
+# Current Ollama pull tags (June 2026): llama4, qwen3, gemma4.
+model = "llama4"
 base_url = "http://localhost:11434"
 
 [providers.azure]
@@ -136,8 +137,11 @@ endpoint = ""
 # dimension (text-embedding-3-small = 1536, text-embedding-3-large = 3072).
 # embedding_deployment = "text-embedding-3-small"
 embedding_dim = 1536
-# REST API version. See Azure OpenAI docs for supported values.
-api_version = "2024-10-21"
+# Azure OpenAI v1 API (GA since Aug 2025): requests go to /openai/v1/{op} with
+# the deployment passed as `model` in the body. The dated monthly api-versions
+# are replaced by a single stable `preview` channel — keep "preview" unless you
+# must pin a specific dated version for a deployment.
+api_version = "preview"
 max_tokens = 1024
 
 # --------------------------------------------------------------------------

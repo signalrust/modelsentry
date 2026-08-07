@@ -46,6 +46,7 @@ fn make_run_and_baseline(
         // One sample per prompt (the n=1 path).
         embeddings: run_embeddings.into_iter().map(|e| vec![e]).collect(),
         completions: vec!["answer".to_string()],
+        model_version: None,
         drift_report: None,
         status: RunStatus::Success,
     };
@@ -56,6 +57,7 @@ fn make_run_and_baseline(
         captured_at: Utc::now(),
         schema_version: BASELINE_SCHEMA_VERSION,
         embedding_model: "test".to_string(),
+        model_version: None,
         prompt_clouds,
         n_runs: 1,
         run_id,

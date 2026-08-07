@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use modelsentry_common::constants::defaults;
 use modelsentry_common::error::{ModelSentryError, Result};
 
-use super::LlmProvider;
+use super::{Completion, LlmProvider};
 use crate::drift::Embedding;
 
 // ── Public type ───────────────────────────────────────────────────────────────
@@ -94,6 +94,14 @@ struct GenerateRequest<'a> {
 #[derive(Deserialize)]
 struct GenerateResponse {
     response: String,
+    /// Model that produced the response (e.g. `llama4`), used to detect a
+    /// silent model-version change since baseline capture.
+    #[serde(default)]
+    model: Option<String>,
+    /// Why generation stopped: `"stop"` (complete) or `"length"` (hit the token
+    /// limit, truncated). A truncated completion is not representative.
+    #[serde(default)]
+    done_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -119,7 +127,8 @@ impl LlmProvider for OllamaProvider {
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Provider`] on network or parse failure.
+    /// - [`ModelSentryError::ProviderTransport`] on a network/transport failure.
+    /// - [`ModelSentryError::ProviderDecode`] if the response cannot be decoded.
     /// - [`ModelSentryError::ProviderHttp`] on a non-200 HTTP status.
     async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>> {
         let mut results = Vec::with_capacity(texts.len());
@@ -136,8 +145,8 @@ impl LlmProvider for OllamaProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| ModelSentryError::Provider {
-                    message: format!("HTTP request failed: {e}"),
+                .map_err(|e| ModelSentryError::ProviderTransport {
+                    message: e.to_string(),
                 })?;
 
             let status = response.status().as_u16();
@@ -153,8 +162,8 @@ impl LlmProvider for OllamaProvider {
                 response
                     .json()
                     .await
-                    .map_err(|e| ModelSentryError::Provider {
-                        message: format!("failed to deserialize embeddings response: {e}"),
+                    .map_err(|e| ModelSentryError::ProviderDecode {
+                        message: format!("embeddings response: {e}"),
                     })?;
 
             results.push(Embedding::new(parsed.embedding)?);
@@ -166,9 +175,13 @@ impl LlmProvider for OllamaProvider {
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Provider`] on network or parse failure.
+    /// - [`ModelSentryError::ProviderTransport`] on a network/transport failure.
+    /// - [`ModelSentryError::ProviderDecode`] if the response cannot be decoded.
     /// - [`ModelSentryError::ProviderHttp`] on a non-200 HTTP status.
-    async fn complete(&self, prompt: &str) -> Result<String> {
+    async fn complete(&self, prompt: &str) -> Result<Completion> {
+        // No cache-busting nonce here: Ollama is a local, single-tenant server
+        // with no shared/proxy completion cache to defeat (unlike the cloud
+        // providers — see `super::cache_bust_nonce`).
         let url = format!("{}/api/generate", self.base_url);
         let body = GenerateRequest {
             model: &self.model,
@@ -182,8 +195,8 @@ impl LlmProvider for OllamaProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("HTTP request failed: {e}"),
+            .map_err(|e| ModelSentryError::ProviderTransport {
+                message: e.to_string(),
             })?;
 
         let status = response.status().as_u16();
@@ -199,11 +212,21 @@ impl LlmProvider for OllamaProvider {
             response
                 .json()
                 .await
-                .map_err(|e| ModelSentryError::Provider {
-                    message: format!("failed to deserialize generate response: {e}"),
+                .map_err(|e| ModelSentryError::ProviderDecode {
+                    message: format!("generate response: {e}"),
                 })?;
 
-        Ok(parsed.response)
+        if parsed.done_reason.as_deref() == Some("length") {
+            return Err(ModelSentryError::Provider {
+                message: "generation truncated (done_reason: length) — raise the model's \
+                          num_predict / context limit or shorten the prompt"
+                    .into(),
+            });
+        }
+        Ok(Completion {
+            text: parsed.response,
+            model_version: parsed.model.filter(|m| !m.is_empty()),
+        })
     }
 
     fn provider_name(&self) -> &'static str {
@@ -235,7 +258,7 @@ mod tests {
 
     fn generate_ok(text: &str) -> serde_json::Value {
         serde_json::json!({
-            "model": "llama3",
+            "model": defaults::ollama::MODEL,
             "response": text,
             "done": true
         })
@@ -258,7 +281,11 @@ mod tests {
             .complete("Say hello")
             .await
             .unwrap();
-        assert_eq!(result, "Hello!");
+        assert_eq!(result.text, "Hello!");
+        assert_eq!(
+            result.model_version.as_deref(),
+            Some(defaults::ollama::MODEL)
+        );
     }
 
     #[tokio::test]
@@ -277,6 +304,27 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].as_slice(), vec1.as_slice());
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_truncated_generation() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": defaults::ollama::MODEL,
+                "response": "partial",
+                "done": true,
+                "done_reason": "length"
+            })))
+            .mount(&server)
+            .await;
+
+        let err = make_provider(&server.uri())
+            .complete("hi")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
     }
 
     #[tokio::test]

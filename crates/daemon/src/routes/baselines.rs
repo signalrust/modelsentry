@@ -78,6 +78,13 @@ async fn capture_baseline(
     })?;
     let newest_id = newest_id.clone();
 
+    // Pin the model version reported by the newest run folded in, so later runs
+    // can be checked for a silent model-version change against this baseline.
+    let model_version = runs
+        .iter()
+        .find(|r| r.id == newest_id)
+        .and_then(|r| r.model_version.clone());
+
     // Pin the cloud to the newest run's embedding dimension; drop older runs
     // captured under a different embedding model (different dimension).
     let dim = embedding_dim(newest_embeddings);
@@ -107,6 +114,7 @@ async fn capture_baseline(
         captured_at: Utc::now(),
         schema_version: BASELINE_SCHEMA_VERSION,
         embedding_model: state.config.providers.openai.embedding_model.clone(),
+        model_version,
         prompt_clouds,
         n_runs: usable.len(),
         run_id: newest_id,

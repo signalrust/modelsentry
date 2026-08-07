@@ -13,7 +13,7 @@ use modelsentry_common::{
 
 use modelsentry_common::constants::defaults;
 
-use super::LlmProvider;
+use super::{Completion, LlmProvider, reject_unusable_finish_reason};
 use crate::drift::Embedding;
 
 // ── Public type ───────────────────────────────────────────────────────────────
@@ -101,6 +101,11 @@ struct ChatRequest<'a> {
     // GPT-5 / reasoning models reject the legacy `max_tokens` (400) and require
     // `max_completion_tokens`; it is also accepted by older chat models.
     max_completion_tokens: u32,
+    // Cache-busting (exchangeability): don't persist this completion for reuse,
+    // and tag each request with a fresh non-semantic nonce so an exact-request
+    // cache cannot return identical completions across baseline runs.
+    store: bool,
+    user: &'a str,
 }
 
 #[derive(Serialize)]
@@ -112,11 +117,20 @@ struct ChatMessage<'a> {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    /// Resolved model identity for this response (e.g. `gpt-4o-2024-08-06`),
+    /// used to detect a silent model-version change since baseline capture.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatMessageContent,
+    /// Why generation stopped: `"stop"` (complete), `"length"` (truncated at the
+    /// token cap), `"content_filter"` (blocked). The latter two are not usable
+    /// completions and must not silently pollute a baseline cloud.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -149,7 +163,8 @@ impl LlmProvider for OpenAiProvider {
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Provider`] on network or parse failure.
+    /// - [`ModelSentryError::ProviderTransport`] on a network/transport failure.
+    /// - [`ModelSentryError::ProviderDecode`] if the response cannot be decoded.
     /// - [`ModelSentryError::ProviderHttp`] on a non-200 HTTP status.
     /// - [`ModelSentryError::DimensionMismatch`] if the API returns embeddings
     ///   of a different width than the configured `embed_dim` (i.e. the
@@ -170,8 +185,8 @@ impl LlmProvider for OpenAiProvider {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("HTTP request failed: {e}"),
+            .map_err(|e| ModelSentryError::ProviderTransport {
+                message: e.to_string(),
             })?;
 
         let status = response.status().as_u16();
@@ -184,8 +199,8 @@ impl LlmProvider for OpenAiProvider {
             response
                 .json()
                 .await
-                .map_err(|e| ModelSentryError::Provider {
-                    message: format!("failed to deserialize embeddings response: {e}"),
+                .map_err(|e| ModelSentryError::ProviderDecode {
+                    message: format!("embeddings response: {e}"),
                 })?;
 
         parsed
@@ -207,15 +222,19 @@ impl LlmProvider for OpenAiProvider {
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Provider`] on network or parse failure.
+    /// - [`ModelSentryError::ProviderTransport`] on a network/transport failure.
+    /// - [`ModelSentryError::ProviderDecode`] if the response cannot be decoded.
     /// - [`ModelSentryError::ProviderHttp`] on a non-200 HTTP status (e.g.
     ///   429 rate-limit).
-    async fn complete(&self, prompt: &str) -> Result<String> {
+    async fn complete(&self, prompt: &str) -> Result<Completion> {
         let url = format!("{}/v1/chat/completions", self.base_url);
 
+        let nonce = super::cache_bust_nonce();
         let request_body = ChatRequest {
             model: &self.model,
             max_completion_tokens: self.max_tokens,
+            store: false,
+            user: &nonce,
             messages: vec![ChatMessage {
                 role: "user",
                 content: prompt,
@@ -230,8 +249,8 @@ impl LlmProvider for OpenAiProvider {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("HTTP request failed: {e}"),
+            .map_err(|e| ModelSentryError::ProviderTransport {
+                message: e.to_string(),
             })?;
 
         let status = response.status().as_u16();
@@ -244,18 +263,26 @@ impl LlmProvider for OpenAiProvider {
             response
                 .json()
                 .await
-                .map_err(|e| ModelSentryError::Provider {
-                    message: format!("failed to deserialize chat response: {e}"),
+                .map_err(|e| ModelSentryError::ProviderDecode {
+                    message: format!("chat response: {e}"),
                 })?;
 
-        parsed
-            .choices
-            .into_iter()
-            .next()
-            .map(|c| c.message.content)
-            .ok_or_else(|| ModelSentryError::Provider {
-                message: "no choices in OpenAI response".into(),
-            })
+        // Empty `model` is treated as "unreported" rather than a real version,
+        // so it never masquerades as a distinct identity in the drift guard.
+        let model_version = parsed.model.filter(|m| !m.is_empty());
+        let choice =
+            parsed
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| ModelSentryError::Provider {
+                    message: "no choices in OpenAI response".into(),
+                })?;
+        reject_unusable_finish_reason(choice.finish_reason.as_deref())?;
+        Ok(Completion {
+            text: choice.message.content,
+            model_version,
+        })
     }
 
     fn provider_name(&self) -> &'static str {
@@ -290,6 +317,7 @@ mod tests {
         serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
+            "model": defaults::openai::MODELS[0],
             "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": text}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
         })
@@ -317,7 +345,11 @@ mod tests {
             .complete("Say hello")
             .await
             .unwrap();
-        assert_eq!(result, "Hello!");
+        assert_eq!(result.text, "Hello!");
+        assert_eq!(
+            result.model_version.as_deref(),
+            Some(defaults::openai::MODELS[0])
+        );
     }
 
     #[tokio::test]
@@ -347,6 +379,44 @@ mod tests {
         .complete("hi")
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn complete_sends_cache_busting_store_false_and_user() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        // The mock only matches when the body opts out of storage; a regression
+        // that drops the cache-busting fields would 404 → unwrap panics.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "store": false })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_ok("ok")))
+            .mount(&server)
+            .await;
+
+        make_provider(&server.uri()).complete("hi").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_truncated_completion() {
+        let server = MockServer::start().await;
+        // finish_reason "length" ⇒ truncated at the token cap; not a usable,
+        // representative completion, so it must error rather than be returned.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": defaults::openai::MODELS[0],
+                "choices": [{"index": 0, "finish_reason": "length",
+                             "message": {"role": "assistant", "content": "partial"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = make_provider(&server.uri())
+            .complete("hi")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
     }
 
     #[tokio::test]

@@ -151,6 +151,7 @@ mod tests {
             captured_at: Utc::now() + Duration::seconds(offset_secs),
             schema_version: modelsentry_common::models::BASELINE_SCHEMA_VERSION,
             embedding_model: "test".into(),
+            model_version: None,
             prompt_clouds: vec![vec![vec![1.0, 2.0], vec![1.1, 1.9]]],
             n_runs: 1,
             run_id: RunId::new(),

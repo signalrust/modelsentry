@@ -18,8 +18,10 @@ use modelsentry_store::AppStore;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 
-use crate::constants::server::{MAX_BODY_BYTES, RATE_LIMIT_BURST, RATE_LIMIT_REPLENISH_SECS};
 use crate::{routes, vault::Vault};
+use modelsentry_common::constants::server::{
+    MAX_BODY_BYTES, RATE_LIMIT_BURST, RATE_LIMIT_REPLENISH_SECS,
+};
 
 /// `GET /health` — lightweight liveness probe for the daemon.
 async fn health() -> Json<serde_json::Value> {
@@ -62,7 +64,14 @@ pub fn build_router(state: AppState) -> Router {
                 axum::http::Method::PUT,
                 axum::http::Method::DELETE,
             ])
-            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+            // `AUTHORIZATION` for bearer tokens and the `X-Api-Key` alternative
+            // (both accepted by the auth middleware), so a browser client on a
+            // non-`*` origin clears CORS preflight with either scheme.
+            .allow_headers([
+                header::CONTENT_TYPE,
+                header::AUTHORIZATION,
+                axum::http::HeaderName::from_static(app_header::API_KEY),
+            ])
     } else {
         tracing::warn!(
             origin = %config.server.cors_origin,

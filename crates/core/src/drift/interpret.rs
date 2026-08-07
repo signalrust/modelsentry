@@ -10,8 +10,17 @@ use modelsentry_common::models::DriftLevel;
 
 /// Build a one-paragraph interpretation of `assessment`, judged against
 /// `target_fpr`.
+///
+/// `model_change` is `Some((baseline_version, run_version))` when the provider
+/// reported a different model version than the one pinned at baseline capture;
+/// the verdict then names the change as an exchangeability caveat (the baseline
+/// describes a different model), akin to the embedding-dimension guard.
 #[must_use]
-pub fn interpret(assessment: &DriftAssessment, target_fpr: f32) -> String {
+pub fn interpret(
+    assessment: &DriftAssessment,
+    target_fpr: f32,
+    model_change: Option<(&str, &str)>,
+) -> String {
     let method = if assessment.method == METHOD_PER_PROMPT {
         "per-prompt conformal"
     } else {
@@ -37,10 +46,22 @@ pub fn interpret(assessment: &DriftAssessment, target_fpr: f32) -> String {
         )
     };
 
+    // Exchangeability caveat: a model-version change since baseline capture
+    // means the run is compared against a different model's distribution.
+    let version_note = match model_change {
+        Some((before, after)) => format!(
+            " ⚠ Model version changed since baseline capture ({before} → {after}): the baseline \
+             describes a different model, so this verdict may be confounded — re-capture the \
+             baseline against the current model."
+        ),
+        None => String::new(),
+    };
+
     if assessment.level == DriftLevel::None {
         return format!(
             "No drift detected: the run's outputs are statistically consistent with the baseline \
-             ({method} test, combined p = {p:.4} ≥ target FPR {target_fpr:.4}).{health_note}"
+             ({method} test, combined p = {p:.4} ≥ target FPR {target_fpr:.4}).{health_note}\
+             {version_note}"
         );
     }
 
@@ -72,7 +93,7 @@ pub fn interpret(assessment: &DriftAssessment, target_fpr: f32) -> String {
     format!(
         "{lead}: the {method} test rejects the no-drift hypothesis (combined p = {p:.4} < target \
          FPR {target_fpr:.4}, magnitude {effect:.1} SD), so the model's outputs have shifted \
-         relative to the baseline.{strongest}{health_note}",
+         relative to the baseline.{strongest}{health_note}{version_note}",
         effect = assessment.effect_size
     )
 }
@@ -102,7 +123,11 @@ mod tests {
 
     #[test]
     fn none_is_reported_as_consistent() {
-        let text = interpret(&assessment(DriftLevel::None, 0.4, METHOD_PER_PROMPT), 0.01);
+        let text = interpret(
+            &assessment(DriftLevel::None, 0.4, METHOD_PER_PROMPT),
+            0.01,
+            None,
+        );
         assert!(text.contains("No drift detected"), "{text}");
         assert!(text.contains("consistent"), "{text}");
     }
@@ -112,6 +137,7 @@ mod tests {
         let text = interpret(
             &assessment(DriftLevel::High, 0.0001, METHOD_PER_PROMPT),
             0.01,
+            None,
         );
         assert!(text.contains("High drift"), "{text}");
         assert!(text.contains("per-prompt conformal"), "{text}");
@@ -122,7 +148,7 @@ mod tests {
     fn flags_low_variance_baseline_in_text() {
         let mut a = assessment(DriftLevel::None, 0.4, METHOD_PER_PROMPT);
         a.per_prompt[0].low_variance_baseline = true;
-        let text = interpret(&a, 0.01);
+        let text = interpret(&a, 0.01, None);
         assert!(text.contains("Baseline health"), "{text}");
     }
 
@@ -130,7 +156,27 @@ mod tests {
     fn pooled_method_is_named() {
         let mut a = assessment(DriftLevel::Medium, 0.001, METHOD_POOLED);
         a.per_prompt.clear();
-        let text = interpret(&a, 0.01);
+        let text = interpret(&a, 0.01, None);
         assert!(text.contains("pooled MMD/energy"), "{text}");
+    }
+
+    #[test]
+    fn flags_model_version_change_on_both_no_drift_and_drift() {
+        // Caveat appears whether or not the run statistically drifted.
+        let no_drift = assessment(DriftLevel::None, 0.4, METHOD_PER_PROMPT);
+        let text = interpret(
+            &no_drift,
+            0.01,
+            Some(("claude-sonnet-4-6", "claude-opus-4-8")),
+        );
+        assert!(text.contains("Model version changed"), "{text}");
+        assert!(
+            text.contains("claude-sonnet-4-6 → claude-opus-4-8"),
+            "{text}"
+        );
+
+        let drift = assessment(DriftLevel::High, 0.0001, METHOD_PER_PROMPT);
+        let text = interpret(&drift, 0.01, Some(("gpt-5.4", "gpt-5.5")));
+        assert!(text.contains("Model version changed"), "{text}");
     }
 }

@@ -38,6 +38,9 @@
 // Sample counts cast to float for averaging/probabilities are always small
 // (cloud sizes, prompt counts), so usize→f32/f64 precision loss is irrelevant.
 #![allow(clippy::cast_precision_loss)]
+// f64 statistics are narrowed to the f32 report grid only at function
+// boundaries; the lost low-order bits are below display/alert resolution.
+#![allow(clippy::cast_possible_truncation)]
 
 use modelsentry_common::{
     constants::drift::{BASELINE_MIN_CLOUD_SPREAD, PERMUTATION_TOLERANCE, STD_FLOOR},
@@ -131,7 +134,7 @@ pub const METHOD_POOLED: &str = modelsentry_common::constants::method::POOLED_TW
 ///
 /// # Errors
 ///
-/// - [`ModelSentryError::Provider`] if the prompt counts differ or no prompt has
+/// - [`ModelSentryError::Drift`] if the prompt counts differ or no prompt has
 ///   usable data.
 /// - [`ModelSentryError::DimensionMismatch`] if embedding dimensions differ.
 pub fn assess(
@@ -140,7 +143,7 @@ pub fn assess(
     config: &AssessmentConfig,
 ) -> Result<DriftAssessment> {
     if baseline.len() != run.len() {
-        return Err(ModelSentryError::Provider {
+        return Err(ModelSentryError::Drift {
             message: format!(
                 "baseline/run prompt count mismatch: {} vs {}",
                 baseline.len(),
@@ -159,7 +162,7 @@ pub fn assess(
         .collect();
 
     if usable.is_empty() {
-        return Err(ModelSentryError::Provider {
+        return Err(ModelSentryError::Drift {
             message: "no prompt has both baseline and run embeddings".to_string(),
         });
     }
@@ -298,18 +301,27 @@ fn mean_std(xs: &[f32]) -> (f32, f32) {
         .sum::<f64>()
         / count;
     let sd = var.sqrt().max(f64::from(STD_FLOOR));
-    #[allow(clippy::cast_possible_truncation)]
-    let out = (mean as f32, sd as f32);
-    out
+    (mean as f32, sd as f32)
 }
 
 /// Stratified permutation p-value of the aggregate statistic `T = Σ max(zᵢ, 0)`.
 ///
-/// `strata[i]` holds prompt `i`'s standardized augmented scores (index 0 is the
-/// observed run/test point). Under H0 the test point is exchangeable with the
-/// baseline points within each prompt, so each permutation draws one position
-/// per prompt — *including* the observed one, which keeps the estimate valid and
-/// floors the p-value at `1/(n_perm + 1)`.
+/// `strata[i]` is prompt `i`'s standardized null pool — the values one draw per
+/// prompt is sampled from under H0. Its contents depend on which path in
+/// [`prompt_score`] produced the prompt, so strata may be *heterogeneous* across
+/// prompts (e.g. when some prompts have only one usable sample because embeds
+/// failed and others have ≥2):
+/// - **≥2 run samples:** the standardized *permutation null* (energy distances of
+///   relabeled baseline/run splits). This pool **excludes** the observed point.
+/// - **1 run sample (conformal):** the standardized augmented scores, which
+///   **include** the observed point at index 0.
+///
+/// The `1/(n_perm + 1)` floor does **not** rely on the observed point being in
+/// the pools: it comes from the `+1` in this function's `(1 + at_least)/(1 +
+/// n_perm)` estimate (and, on the conformal path, the matching `+1` already
+/// applied when the augmented scores were formed). Under H0 a prompt's draws are
+/// exchangeable within its pool, so summing one positive-excursion draw per
+/// prompt yields a valid permutation reference for the aggregate `T`.
 fn stratified_permutation_p(strata: &[Vec<f32>], observed: f32, n_perm: usize, seed: u64) -> f32 {
     let mut rng = SplitMix64::new(seed);
     let mut at_least = 0usize;
@@ -397,11 +409,7 @@ fn standardize(scores: &[f32]) -> Vec<f32> {
     let sd = var.sqrt().max(f64::from(STD_FLOOR));
     scores
         .iter()
-        .map(|&s| {
-            #[allow(clippy::cast_possible_truncation)]
-            let z = ((f64::from(s) - mean) / sd) as f32;
-            z
-        })
+        .map(|&s| ((f64::from(s) - mean) / sd) as f32)
         .collect()
 }
 
@@ -479,9 +487,7 @@ fn euclidean(a: &[f32], b: &[f32]) -> f32 {
             d * d
         })
         .sum();
-    #[allow(clippy::cast_possible_truncation)]
-    let dist = sum.sqrt() as f32;
-    dist
+    sum.sqrt() as f32
 }
 
 /// RMS distance of a baseline cloud's points to their centroid — the cloud's
@@ -517,9 +523,7 @@ fn cloud_spread(cloud: &[Vec<f32>]) -> f32 {
         }
         sum_sq += d2;
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let spread = (sum_sq / count).sqrt() as f32;
-    spread
+    (sum_sq / count).sqrt() as f32
 }
 
 /// Validate that a cloud and all run samples share one dimension.

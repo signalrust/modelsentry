@@ -29,6 +29,10 @@
 //! is ~Uniform(0, 1), so alerting when `p < α` yields a false-positive rate of
 //! approximately `α` — the threshold *is* the target FPR, by construction.
 
+// f64 statistics are narrowed to the f32 report grid only at function
+// boundaries; the lost low-order bits are below display/alert resolution.
+#![allow(clippy::cast_possible_truncation)]
+
 use modelsentry_common::constants::drift::{
     BANDWIDTH_FLOOR, MIN_SAMPLES_PER_GROUP, PERMUTATION_TOLERANCE, STD_FLOOR,
 };
@@ -225,7 +229,7 @@ fn statistic_from_gram(gram: &[f64], n: usize, perm: &[usize], m: usize, unbiase
 /// group size, returning that dimension.
 fn validate(x: &[Vec<f32>], y: &[Vec<f32>]) -> Result<usize> {
     if x.len() < MIN_SAMPLES_PER_GROUP || y.len() < MIN_SAMPLES_PER_GROUP {
-        return Err(ModelSentryError::Provider {
+        return Err(ModelSentryError::Drift {
             message: format!(
                 "two-sample test needs ≥{MIN_SAMPLES_PER_GROUP} samples per group; got \
                  {} baseline, {} run",
@@ -261,9 +265,7 @@ pub fn mmd2_unbiased(x: &[Vec<f32>], y: &[Vec<f32>], bandwidth: f32) -> Result<f
     let gram = gram_matrix(&pooled, Kernel::Rbf { bandwidth });
     let perm: Vec<usize> = (0..pooled.len()).collect();
     // f64 accumulation → f32 report value at the public boundary.
-    #[allow(clippy::cast_possible_truncation)]
-    let stat = statistic_from_gram(&gram, pooled.len(), &perm, x.len(), true) as f32;
-    Ok(stat)
+    Ok(statistic_from_gram(&gram, pooled.len(), &perm, x.len(), true) as f32)
 }
 
 /// Energy distance between `x` and `y` (parameter-free).
@@ -277,9 +279,7 @@ pub fn energy_distance(x: &[Vec<f32>], y: &[Vec<f32>]) -> Result<f32> {
     let gram = gram_matrix(&pooled, Kernel::Energy);
     let perm: Vec<usize> = (0..pooled.len()).collect();
     // f64 accumulation → f32 report value at the public boundary.
-    #[allow(clippy::cast_possible_truncation)]
-    let stat = statistic_from_gram(&gram, pooled.len(), &perm, x.len(), false) as f32;
-    Ok(stat)
+    Ok(statistic_from_gram(&gram, pooled.len(), &perm, x.len(), false) as f32)
 }
 
 /// Run a permutation two-sample test of `baseline` vs `run`.
@@ -341,9 +341,7 @@ fn standardized_excursion(observed: f32, nulls: &[f32]) -> f32 {
         .sum::<f64>()
         / count;
     let sd = var.sqrt().max(f64::from(STD_FLOOR));
-    #[allow(clippy::cast_possible_truncation)]
-    let z = ((observed - mean) / sd).max(0.0) as f32;
-    z
+    ((observed - mean) / sd).max(0.0) as f32
 }
 
 /// Observed statistic plus the **permutation null distribution** (the `n_perm`
@@ -373,7 +371,6 @@ pub fn permutation_nulls(
     let gram = gram_matrix(&pooled, kernel);
     let identity: Vec<usize> = (0..total).collect();
     // Each statistic is accumulated in f64, then rounded to the f32 report grid.
-    #[allow(clippy::cast_possible_truncation)]
     let observed = statistic_from_gram(&gram, total, &identity, m, unbiased) as f32;
 
     let mut rng = SplitMix64::new(seed);
@@ -381,9 +378,7 @@ pub fn permutation_nulls(
     let mut nulls = Vec::with_capacity(n_permutations);
     for _ in 0..n_permutations {
         fisher_yates(&mut perm, &mut rng);
-        #[allow(clippy::cast_possible_truncation)]
-        let stat = statistic_from_gram(&gram, total, &perm, m, unbiased) as f32;
-        nulls.push(stat);
+        nulls.push(statistic_from_gram(&gram, total, &perm, m, unbiased) as f32);
     }
     Ok((observed, nulls))
 }
@@ -425,9 +420,7 @@ impl SplitMix64 {
             return 0;
         }
         let product = u128::from(self.next_u64()) * bound as u128;
-        #[allow(clippy::cast_possible_truncation)]
-        let result = (product >> 64) as usize;
-        result
+        (product >> 64) as usize
     }
 }
 

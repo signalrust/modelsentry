@@ -129,7 +129,7 @@ async fn trigger_probe_run(
         .map_err(AppError)?;
 
     let runner = ProbeRunner::new(provider);
-    let concurrency = crate::constants::runtime::PROBE_CONCURRENCY;
+    let concurrency = modelsentry_common::constants::scheduler::PROBE_CONCURRENCY;
     let samples = state.config.alerts.samples_per_prompt;
     let run = if runner.has_embeddings() {
         runner.run(&probe, concurrency, samples).await?

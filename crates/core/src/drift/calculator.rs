@@ -69,9 +69,24 @@ impl DriftCalculator {
             });
         }
 
+        // Model-version exchangeability guard: if the provider reports a
+        // different model version than the one pinned at baseline capture, the
+        // run is being compared against a different model's distribution. We
+        // can only assert a change when *both* versions are known; an unknown
+        // (provider reported none) is left unflagged rather than guessed.
+        let model_change = match (
+            baseline.model_version.as_deref(),
+            run.model_version.as_deref(),
+        ) {
+            (Some(baseline_v), Some(run_v)) if baseline_v != run_v => Some((baseline_v, run_v)),
+            _ => None,
+        };
+        let model_version_changed = model_change.is_some();
+
         let assessment =
             assessment::assess(&baseline.prompt_clouds, &run.embeddings, &self.config)?;
-        let interpretation = interpret::interpret(&assessment, self.config.target_fpr);
+        let interpretation =
+            interpret::interpret(&assessment, self.config.target_fpr, model_change);
         let per_prompt = assessment
             .per_prompt
             .iter()
@@ -93,6 +108,7 @@ impl DriftCalculator {
             method: assessment.method.to_string(),
             per_prompt,
             drift_level: assessment.level,
+            model_version_changed,
             interpretation,
             computed_at: Utc::now(),
         })
@@ -116,6 +132,7 @@ mod tests {
             // One sample per prompt (the n=1 path).
             embeddings: embeddings.into_iter().map(|e| vec![e]).collect(),
             completions: vec!["answer".to_string()],
+            model_version: None,
             drift_report: None,
             status: RunStatus::Success,
         }
@@ -128,6 +145,7 @@ mod tests {
             captured_at: Utc::now(),
             schema_version: BASELINE_SCHEMA_VERSION,
             embedding_model: "test".to_string(),
+            model_version: None,
             prompt_clouds: clouds,
             n_runs: 1,
             run_id: RunId::new(),
@@ -188,6 +206,48 @@ mod tests {
         let run = run_with(vec![axis_point(4, 0.0)]);
         let err = calc.compute(&run, &baseline).unwrap_err();
         assert!(err.to_string().contains("re-capture"), "{err}");
+    }
+
+    #[test]
+    fn model_version_change_is_flagged_in_report_and_interpretation() {
+        let calc = DriftCalculator::new(AssessmentConfig::default());
+        let mut baseline = baseline_with(vec![cloud(15, 4, 0.0)]);
+        baseline.model_version = Some("gpt-5.4".to_string());
+        let mut run = run_with(vec![axis_point(4, 0.01)]);
+        run.model_version = Some("gpt-5.5".to_string());
+
+        let report = calc.compute(&run, &baseline).unwrap();
+        assert!(report.model_version_changed);
+        assert!(
+            report.interpretation.contains("Model version changed"),
+            "{}",
+            report.interpretation
+        );
+    }
+
+    #[test]
+    fn matching_model_version_is_not_flagged() {
+        let calc = DriftCalculator::new(AssessmentConfig::default());
+        let mut baseline = baseline_with(vec![cloud(15, 4, 0.0)]);
+        baseline.model_version = Some("gpt-5.4".to_string());
+        let mut run = run_with(vec![axis_point(4, 0.01)]);
+        run.model_version = Some("gpt-5.4".to_string());
+
+        let report = calc.compute(&run, &baseline).unwrap();
+        assert!(!report.model_version_changed);
+        assert!(!report.interpretation.contains("Model version changed"));
+    }
+
+    #[test]
+    fn unknown_model_version_is_not_flagged() {
+        // Baseline knows its version but the run reports none (provider silent):
+        // we must not guess a change.
+        let calc = DriftCalculator::new(AssessmentConfig::default());
+        let mut baseline = baseline_with(vec![cloud(15, 4, 0.0)]);
+        baseline.model_version = Some("gpt-5.4".to_string());
+        let run = run_with(vec![axis_point(4, 0.01)]); // model_version: None
+        let report = calc.compute(&run, &baseline).unwrap();
+        assert!(!report.model_version_changed);
     }
 
     #[test]

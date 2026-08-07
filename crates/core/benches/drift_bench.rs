@@ -35,6 +35,7 @@ fn make_run_and_baseline(dim: usize) -> (ProbeRun, BaselineSnapshot) {
         // 5 prompts, 3 samples each (the default multi-sample path).
         embeddings: vec![vec![emb.clone(); 3]; 5],
         completions: vec!["hello world foo bar baz".to_owned(); 5],
+        model_version: None,
         drift_report: None,
         status: RunStatus::Success,
     };
@@ -63,6 +64,7 @@ fn make_run_and_baseline(dim: usize) -> (ProbeRun, BaselineSnapshot) {
         captured_at: Utc::now(),
         schema_version: modelsentry_common::models::BASELINE_SCHEMA_VERSION,
         embedding_model: "bench".to_owned(),
+        model_version: None,
         prompt_clouds,
         n_runs: 20,
         run_id,

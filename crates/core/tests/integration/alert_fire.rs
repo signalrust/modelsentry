@@ -26,6 +26,7 @@ fn make_report(combined_p_value: f32, level: DriftLevel) -> DriftReport {
         method: modelsentry_common::constants::method::PER_PROMPT_CONFORMAL.to_string(),
         per_prompt: Vec::new(),
         drift_level: level,
+        model_version_changed: false,
         interpretation: String::new(),
         computed_at: Utc::now(),
     }

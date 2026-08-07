@@ -1,10 +1,14 @@
-//! Azure OpenAI Chat Completions + Embeddings API adapter.
+//! Azure OpenAI Chat Completions + Embeddings API adapter (v1 API).
 //!
-//! Azure is OpenAI-shaped but differs in two ways the adapter must honor:
-//! - **URL layout:** the model is named by a *deployment* in the path, with a
-//!   required `api-version` query parameter:
-//!   `{endpoint}/openai/deployments/{deployment}/chat/completions?api-version=…`.
+//! Targets the Azure OpenAI **v1 API** (GA since August 2025), which is
+//! OpenAI-shaped but differs in three ways the adapter honors:
+//! - **URL layout:** one versionless base path, `{endpoint}/openai/v1/{op}`,
+//!   with a single stable `api-version=preview` channel (no dated monthly
+//!   versions). The model is **not** in the path: the deployment name is sent
+//!   as the `model` field of the request body, exactly like OpenAI.
 //! - **Auth:** an `api-key` request header, not `Authorization: Bearer`.
+//! - **Model identity:** the response echoes the underlying model in its
+//!   `model` field, which the adapter surfaces for model-version drift checks.
 //!
 //! The resource `endpoint`, `api_version`, and embedding deployment come from
 //! `[providers.azure]`; the chat deployment comes from the per-probe
@@ -24,7 +28,7 @@ use modelsentry_common::{
     types::ApiKey,
 };
 
-use super::LlmProvider;
+use super::{Completion, LlmProvider, reject_unusable_finish_reason};
 use crate::drift::Embedding;
 
 // ── Public type ───────────────────────────────────────────────────────────────
@@ -114,11 +118,12 @@ impl AzureOpenAiProvider {
         Self { max_tokens, ..self }
     }
 
-    /// Build the deployment URL for an operation (`chat/completions`,
-    /// `embeddings`) including the required `api-version` query parameter.
-    fn deployment_url(&self, deployment: &str, operation: &str) -> String {
+    /// Build the v1 URL for an operation (`chat/completions`, `embeddings`):
+    /// `{endpoint}/openai/v1/{operation}?api-version={api_version}`. The model
+    /// is supplied as the request body's `model` field, not in the path.
+    fn v1_url(&self, operation: &str) -> String {
         format!(
-            "{}/openai/deployments/{deployment}/{operation}?api-version={}",
+            "{}/openai/v1/{operation}?api-version={}",
             self.endpoint, self.api_version
         )
     }
@@ -126,15 +131,22 @@ impl AzureOpenAiProvider {
 
 // ── Wire types (private) ──────────────────────────────────────────────────────
 //
-// Azure determines the model from the deployment in the URL, so neither request
-// body carries a `model` field.
+// The v1 API takes the deployment name as the request body's `model` field
+// (OpenAI-shaped), not in the URL path.
 
 #[derive(Serialize)]
 struct ChatRequest<'a> {
+    /// The chat deployment name (Azure's `model` is the deployment).
+    model: &'a str,
     messages: Vec<ChatMessage<'a>>,
     // Modern Azure api-versions accept `max_completion_tokens` (and reasoning
     // models require it); mirrors the OpenAI adapter.
     max_completion_tokens: u32,
+    // Cache-busting (exchangeability): don't persist this completion for reuse,
+    // and tag each request with a fresh non-semantic nonce so an exact-request
+    // cache cannot return identical completions across baseline runs.
+    store: bool,
+    user: &'a str,
 }
 
 #[derive(Serialize)]
@@ -146,11 +158,19 @@ struct ChatMessage<'a> {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    /// Underlying model identity echoed by the API, used to detect a silent
+    /// model-version change since baseline capture.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatMessageContent,
+    /// Why generation stopped: `"stop"` (complete), `"length"` (truncated),
+    /// `"content_filter"` (blocked) — the latter two are not usable completions.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +180,8 @@ struct ChatMessageContent {
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
+    /// The embedding deployment name (the v1 embeddings route requires `model`).
+    model: &'a str,
     input: &'a [String],
 }
 
@@ -181,8 +203,9 @@ impl LlmProvider for AzureOpenAiProvider {
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Provider`] if no embedding deployment is
-    ///   configured, or on network/parse failure.
+    /// - [`ModelSentryError::Provider`] if no embedding deployment is configured.
+    /// - [`ModelSentryError::ProviderTransport`] on a network/transport failure.
+    /// - [`ModelSentryError::ProviderDecode`] if the response cannot be decoded.
     /// - [`ModelSentryError::ProviderHttp`] on a non-200 HTTP status.
     /// - [`ModelSentryError::DimensionMismatch`] if a returned embedding width
     ///   differs from the configured `embedding_dim`.
@@ -195,18 +218,21 @@ impl LlmProvider for AzureOpenAiProvider {
                           [providers.azure] embedding_deployment to enable drift detection"
                         .into(),
                 })?;
-        let url = self.deployment_url(deployment, "embeddings");
+        let url = self.v1_url("embeddings");
 
         let response = self
             .client
             .post(&url)
             .timeout(self.request_timeout)
             .header(azure_defaults::API_KEY_HEADER, self.api_key.expose())
-            .json(&EmbedRequest { input: texts })
+            .json(&EmbedRequest {
+                model: deployment,
+                input: texts,
+            })
             .send()
             .await
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("HTTP request failed: {e}"),
+            .map_err(|e| ModelSentryError::ProviderTransport {
+                message: e.to_string(),
             })?;
 
         let status = response.status().as_u16();
@@ -219,8 +245,8 @@ impl LlmProvider for AzureOpenAiProvider {
             response
                 .json()
                 .await
-                .map_err(|e| ModelSentryError::Provider {
-                    message: format!("failed to deserialize embeddings response: {e}"),
+                .map_err(|e| ModelSentryError::ProviderDecode {
+                    message: format!("embeddings response: {e}"),
                 })?;
 
         parsed
@@ -243,18 +269,23 @@ impl LlmProvider for AzureOpenAiProvider {
     ///
     /// # Errors
     ///
-    /// - [`ModelSentryError::Provider`] on network or parse failure.
+    /// - [`ModelSentryError::ProviderTransport`] on a network/transport failure.
+    /// - [`ModelSentryError::ProviderDecode`] if the response cannot be decoded.
     /// - [`ModelSentryError::ProviderHttp`] on a non-200 HTTP status.
-    async fn complete(&self, prompt: &str) -> Result<String> {
-        let url = self.deployment_url(&self.chat_deployment, "chat/completions");
+    async fn complete(&self, prompt: &str) -> Result<Completion> {
+        let url = self.v1_url("chat/completions");
 
+        let nonce = super::cache_bust_nonce();
         let response = self
             .client
             .post(&url)
             .timeout(self.request_timeout)
             .header(azure_defaults::API_KEY_HEADER, self.api_key.expose())
             .json(&ChatRequest {
+                model: &self.chat_deployment,
                 max_completion_tokens: self.max_tokens,
+                store: false,
+                user: &nonce,
                 messages: vec![ChatMessage {
                     role: "user",
                     content: prompt,
@@ -262,8 +293,8 @@ impl LlmProvider for AzureOpenAiProvider {
             })
             .send()
             .await
-            .map_err(|e| ModelSentryError::Provider {
-                message: format!("HTTP request failed: {e}"),
+            .map_err(|e| ModelSentryError::ProviderTransport {
+                message: e.to_string(),
             })?;
 
         let status = response.status().as_u16();
@@ -276,18 +307,24 @@ impl LlmProvider for AzureOpenAiProvider {
             response
                 .json()
                 .await
-                .map_err(|e| ModelSentryError::Provider {
-                    message: format!("failed to deserialize chat response: {e}"),
+                .map_err(|e| ModelSentryError::ProviderDecode {
+                    message: format!("chat response: {e}"),
                 })?;
 
-        parsed
-            .choices
-            .into_iter()
-            .next()
-            .map(|c| c.message.content)
-            .ok_or_else(|| ModelSentryError::Provider {
-                message: "no choices in Azure OpenAI response".into(),
-            })
+        let model_version = parsed.model.filter(|m| !m.is_empty());
+        let choice =
+            parsed
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| ModelSentryError::Provider {
+                    message: "no choices in Azure OpenAI response".into(),
+                })?;
+        reject_unusable_finish_reason(choice.finish_reason.as_deref())?;
+        Ok(Completion {
+            text: choice.message.content,
+            model_version,
+        })
     }
 
     fn provider_name(&self) -> &'static str {
@@ -320,13 +357,14 @@ mod tests {
             ApiKey::new("test-key".into()),
             base_url,
             "gpt-4o-prod",
-            "2024-10-21",
+            azure_defaults::API_VERSION,
         )
         .expect("valid provider config")
     }
 
     fn chat_ok(text: &str) -> serde_json::Value {
         serde_json::json!({
+            "model": azure_defaults::MODELS[0],
             "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": text}}]
         })
     }
@@ -341,12 +379,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_uses_deployment_path_api_version_and_api_key_header() {
+    async fn complete_uses_v1_path_deployment_as_model_and_api_key_header() {
+        use wiremock::matchers::body_partial_json;
         let server = MockServer::start().await;
+        // v1 API: versionless `/openai/v1/...` path, `api-version=preview`
+        // channel, and the deployment carried as the body `model` field.
         Mock::given(method("POST"))
-            .and(path("/openai/deployments/gpt-4o-prod/chat/completions"))
-            .and(query_param("api-version", "2024-10-21"))
+            .and(path("/openai/v1/chat/completions"))
+            .and(query_param("api-version", azure_defaults::API_VERSION))
             .and(header("api-key", "test-key"))
+            .and(body_partial_json(
+                serde_json::json!({ "model": "gpt-4o-prod" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(chat_ok("Hello!")))
             .mount(&server)
             .await;
@@ -355,14 +399,18 @@ mod tests {
             .complete("Say hello")
             .await
             .unwrap();
-        assert_eq!(result, "Hello!");
+        assert_eq!(result.text, "Hello!");
+        assert_eq!(
+            result.model_version.as_deref(),
+            Some(azure_defaults::MODELS[0])
+        );
     }
 
     #[tokio::test]
     async fn trailing_slash_in_endpoint_is_trimmed() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/openai/deployments/gpt-4o-prod/chat/completions"))
+            .and(path("/openai/v1/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(chat_ok("ok")))
             .mount(&server)
             .await;
@@ -372,7 +420,7 @@ mod tests {
             ApiKey::new("test-key".into()),
             format!("{}/", server.uri()),
             "gpt-4o-prod",
-            "2024-10-21",
+            azure_defaults::API_VERSION,
         )
         .expect("valid config")
         .complete("hi")
@@ -381,12 +429,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embed_hits_embedding_deployment_and_returns_vectors() {
+    async fn complete_sends_cache_busting_store_false() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openai/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "store": false })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_ok("ok")))
+            .mount(&server)
+            .await;
+
+        make_provider(&server.uri()).complete("hi").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_truncated_completion() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openai/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": azure_defaults::MODELS[0],
+                "choices": [{"index": 0, "finish_reason": "length",
+                             "message": {"role": "assistant", "content": "partial"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = make_provider(&server.uri())
+            .complete("hi")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn embed_hits_v1_route_with_deployment_as_model() {
+        use wiremock::matchers::body_partial_json;
         let server = MockServer::start().await;
         let vec1 = vec![0.1_f32, 0.2, 0.3];
         Mock::given(method("POST"))
-            .and(path("/openai/deployments/embed-prod/embeddings"))
+            .and(path("/openai/v1/embeddings"))
             .and(header("api-key", "test-key"))
+            .and(body_partial_json(
+                serde_json::json!({ "model": "embed-prod" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(embed_ok(vec![vec1.clone()])))
             .mount(&server)
             .await;
@@ -412,7 +498,7 @@ mod tests {
     async fn embed_rejects_dimension_mismatch() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/openai/deployments/embed-prod/embeddings"))
+            .and(path("/openai/v1/embeddings"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(embed_ok(vec![vec![0.1_f32, 0.2, 0.3]])),
             )
@@ -437,7 +523,7 @@ mod tests {
     async fn complete_returns_error_on_429() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/openai/deployments/gpt-4o-prod/chat/completions"))
+            .and(path("/openai/v1/chat/completions"))
             .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
             .mount(&server)
             .await;
@@ -459,7 +545,7 @@ mod tests {
             ApiKey::new("k".into()),
             "",
             "gpt-4o-prod",
-            "2024-10-21",
+            azure_defaults::API_VERSION,
         )
         .unwrap_err();
         assert!(err.to_string().contains("endpoint"));
@@ -472,7 +558,7 @@ mod tests {
             ApiKey::new("k".into()),
             "https://x.example",
             "",
-            "2024-10-21",
+            azure_defaults::API_VERSION,
         )
         .unwrap_err();
         assert!(err.to_string().contains("deployment"));

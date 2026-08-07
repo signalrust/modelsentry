@@ -23,8 +23,8 @@ use modelsentry_store::AppStore;
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::constants::runtime::{PROBE_CONCURRENCY, RECONCILE_INTERVAL};
 use crate::provider_factory::ProviderResolver;
+use modelsentry_common::constants::scheduler::{PROBE_CONCURRENCY, RECONCILE_INTERVAL};
 
 /// Tokio-based scheduler that fires [`ProbeRunner`] for each probe on its
 /// configured schedule and writes results back to the store.
@@ -295,7 +295,12 @@ fn scheduled_next_run(store: &AppStore, probe: &Probe) -> DateTime<Utc> {
                 probe_id = %probe.id,
                 "scheduler: cannot read schedule state, falling back to interval: {e}",
             );
-            next_run_after(&probe.schedule, Utc::now())
+            // Persist the fallback (like the fresh-probe branch) so a transient
+            // read error doesn't re-phase the probe on every tick — once the
+            // store recovers, the stored next-run resumes restart precision.
+            let next_at = next_run_after(&probe.schedule, Utc::now());
+            advance_schedule_to(store, &probe.id, next_at);
+            next_at
         }
     }
 }
@@ -502,7 +507,7 @@ mod tests {
     use modelsentry_core::{
         alert::AlertEngine,
         drift::{Embedding, assessment::AssessmentConfig, calculator::DriftCalculator},
-        provider::LlmProvider,
+        provider::{Completion, LlmProvider},
     };
     use modelsentry_store::AppStore;
     use tempfile::TempDir;
@@ -520,8 +525,11 @@ mod tests {
                 message: "not supported".to_string(),
             })
         }
-        async fn complete(&self, _: &str) -> Result<String> {
-            Ok("pong".to_string())
+        async fn complete(&self, _: &str) -> Result<Completion> {
+            Ok(Completion {
+                text: "pong".to_string(),
+                model_version: None,
+            })
         }
         fn provider_name(&self) -> &'static str {
             "test"
@@ -541,7 +549,7 @@ mod tests {
                 message: "fail".to_string(),
             })
         }
-        async fn complete(&self, _: &str) -> Result<String> {
+        async fn complete(&self, _: &str) -> Result<Completion> {
             Err(ModelSentryError::Provider {
                 message: "fail".to_string(),
             })
@@ -566,8 +574,11 @@ mod tests {
                 .map(|_| Embedding::new(vec![0.05, 0.0, 0.0, 0.0]))
                 .collect()
         }
-        async fn complete(&self, _: &str) -> Result<String> {
-            Ok("answer".to_string())
+        async fn complete(&self, _: &str) -> Result<Completion> {
+            Ok(Completion {
+                text: "answer".to_string(),
+                model_version: None,
+            })
         }
         fn provider_name(&self) -> &'static str {
             "test"
@@ -786,6 +797,7 @@ mod tests {
             captured_at: Utc::now(),
             schema_version: BASELINE_SCHEMA_VERSION,
             embedding_model: "test".to_string(),
+            model_version: None,
             prompt_clouds: vec![cloud],
             n_runs: 6,
             run_id: RunId::new(),

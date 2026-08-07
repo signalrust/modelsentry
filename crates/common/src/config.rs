@@ -31,11 +31,11 @@ pub struct ServerConfig {
 }
 
 fn default_timeout_secs() -> u64 {
-    30
+    crate::constants::server::DEFAULT_TIMEOUT_SECS
 }
 
 fn default_cors_origin() -> String {
-    "http://localhost:5173".to_string()
+    crate::constants::server::DEFAULT_CORS_ORIGIN.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

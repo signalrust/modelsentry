@@ -328,7 +328,12 @@ impl AlertEngine {
         let host = parsed
             .host_str()
             .ok_or_else(|| "URL has no host".to_string())?;
-        let port = parsed.port_or_known_default().unwrap_or(443);
+        // The scheme is validated to http/https above, so a known default port
+        // always exists — surface its absence explicitly rather than defaulting
+        // to a wrong port (e.g. 443 for an http URL).
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| "URL has no port and no known default for its scheme".to_string())?;
 
         let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
             .await
@@ -413,6 +418,7 @@ mod tests {
             method: modelsentry_common::constants::method::PER_PROMPT_CONFORMAL.to_string(),
             per_prompt: Vec::new(),
             drift_level: DriftLevel::None,
+            model_version_changed: false,
             interpretation: String::new(),
             computed_at: Utc::now(),
         }

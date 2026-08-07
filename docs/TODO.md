@@ -25,7 +25,17 @@ the core loop (configure → probe → baseline → drift → alert) without it.
   resolver (`provider_factory::build_provider`), no registry, vault store-only.
   Frontend mirrors `ProviderSpec`; daemon is API-only; dashboard builds with
   `adapter-node`.
-- **Azure OpenAI** provider (adapter + `[providers.azure]` config + UI).
+- **Azure OpenAI** provider (adapter + `[providers.azure]` config + UI). *Now on
+  the **v1 API** (GA since Aug 2025): versionless `/openai/v1/{op}` path with the
+  single stable `api-version=preview` channel (no dated monthly versions), and the
+  deployment passed as the body `model` field. `defaults::azure::API_VERSION =
+  "preview"`.*
+- **Provider model constants refreshed to June 2026** (`constants.rs` `defaults`):
+  per-provider `MODELS` top-3 menus + a derived default `MODEL` — OpenAI
+  `gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini`, Anthropic `claude-opus-4-8`/
+  `claude-sonnet-4-6`/`claude-haiku-4-5`, Ollama `llama4`/`qwen3`/`gemma4`, Azure
+  reuses OpenAI's. Anthropic `API_VERSION` stays `2023-06-01` (the live contract
+  identifier, not a stale date).
 - **Drift detection rebuilt** on a calibrated two-sample foundation (schema v2):
   measures *completions* not prompts; conformal per-prompt + MMD/energy +
   permutation; honest interpretation layer.
@@ -132,6 +142,32 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
 
 ## P2 — Statistical rigor (path to a 9–10 calibration story)
 
+**Exchangeability hardening — NEXT PRIORITIES.** Conformal/permutation validity
+assumes baseline/run exchangeability; the two biggest *silent* breakers are a
+model-version change and provider-side caching. Turn them from silent confounders
+into detected/closed:
+
+- [x] **Model-version pin + detection — DONE.** Each provider's `complete` now
+      returns a `Completion { text, model_version }` parsed from the response
+      `model` field (OpenAI/Azure/Ollama `model`, Anthropic `model`). The run
+      records the observed version (`ProbeRun.model_version`); baseline capture
+      pins it (`BaselineSnapshot.model_version`); `DriftCalculator::compute`
+      compares them and sets `DriftReport.model_version_changed`, with the
+      `before → after` named in the verdict text (`interpret.rs`) — only flagged
+      when *both* versions are known (an unreported version is never guessed).
+      (`crates/core/src/provider/*`, `probe_runner.rs`, `drift/calculator.rs`,
+      `drift/interpret.rs`, `routes/baselines.rs`, `common/models.rs`.)
+- [x] **Cache-busting — DONE.** Each cloud-provider completion request carries a
+      fresh non-semantic nonce (`provider::cache_bust_nonce`, a per-call UUID):
+      OpenAI/Azure send `store: false` + a varying `user`; Anthropic sends
+      `metadata.user_id`. This defeats an exact-request cache that could return
+      identical completions and collapse a baseline cloud to a near-constant
+      (faking determinism). Ollama is exempt (local, no shared cache). The model
+      never sees the nonce, so probe semantics are unchanged.
+- [ ] **Time-of-day effects — DOC ONLY, do not engineer.** Proper handling means
+      stratifying baselines by time window (splits data → less power) or schedule
+      jitter (weak), for a confounder of unproven magnitude in LLM APIs. Keep it as
+      a stated caveat (see Honesty section), not code.
 - [ ] **Sequential control — dashboard surfacing (the UI remainder).** The
       **backend alpha-spending control is shipped** (see Done): `[alerts.sequential]`
       (`window_secs`, `alpha_budget`) bounds the expected false alarms per rule per
@@ -176,6 +212,15 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
 
 ## P3 — Hygiene / docs / deploy
 
+- [x] **Gate null-pool doc overclaim — DONE.** `stratified_permutation_p`'s doc
+      now states the null pool is path-dependent (≥2-sample = permutation null,
+      **excludes** the observed point; 1-sample conformal = augmented scores,
+      **includes** it), that strata are therefore heterogeneous, and that the
+      `1/(n_perm+1)` floor comes from the `+1` in the estimate, not from including
+      the observed point. (`assessment.rs`)
+- [x] **CORS `X-Api-Key` — DONE.** `server.rs` CORS `allow_headers` now includes
+      `app_header::API_KEY` alongside `CONTENT_TYPE`/`AUTHORIZATION`, so a browser
+      client on a non-`*` origin clears preflight with either auth scheme.
 - [ ] **README "proxies /api" fix.** Still wrong: `README.md:258` says
       `npm run dev … (proxies /api to :7740)`. The dev server does **not** proxy;
       the browser calls `:7740` directly (CORS). Correct the wording.
@@ -209,6 +254,24 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
   thread-handoff would cost more than it saves. Revisit only if profiling shows a
   hot spot (e.g. the CPU-bound drift permutation test → `block_in_place`); not a
   blanket wrap.
+- ~~**`ModelSentryError::Provider { message }` is a stringly-typed catch-all.**~~
+  **DONE.** Split into matchable variants: `ProviderTransport` (network/transport
+  failure), `ProviderDecode` (response-body parse failure), `Drift` (drift-data
+  validation: prompt-count mismatch / no usable prompt / too few samples /
+  non-finite embedding), and `Internal` (e.g. "semaphore closed"). `Provider` now
+  carries only genuine *semantic* provider failures (no choices, safety refusal,
+  unsupported capability). All provider/drift/runner sites + `# Errors` docs
+  updated; AppError still maps the non-semantic ones to 500 via its catch-all.
+- **`let out = (…); out` attribute-scoping workaround.** Used only to attach an
+  `#[allow(clippy::cast_*)]` to an expression (e.g. `assessment.rs:301`,
+  `euclidean`, `twosample.rs next_bounded`). A module-level `#![allow]` (as
+  `assessment.rs` already does for `cast_precision_loss`) would remove the
+  boilerplate. (Trivial.)
+- ~~**`scheduled_next_run` error branch doesn't persist**~~ — **DONE.** The
+  store-read-error branch now persists the fallback next-run (via
+  `advance_schedule_to`, like the fresh-probe branch), so a transient read error
+  no longer re-phases the probe every tick; restart precision resumes once the
+  store recovers. (`scheduler.rs`)
 - **Test gaps (qualitative).** No frontend tests. Calibration is empirically
   validated (null-FPR Monte-Carlo) and the scheduler has restart-catch-up and
   shutdown tests, but there are still no store concurrency-stress tests.
@@ -245,6 +308,40 @@ nowhere under `web/src/routes` or `web/src/lib/components`).
 - ~~f64 kernel/statistic sums~~ — **done** (P2).
 - ~~Stale Šidák references~~ — **done** (P3); no doc describes the *current* gate
   as Šidák (methodology keeps it only as historical/citation context).
+
+## ⭐ Premium / vision — broaden what "drift" means (post-v1, additive)
+
+These close the *claims-vs-reality* gap from the **Honesty** section below by
+actually doing more, not just rewording. **Crucially, this is additive, not a
+rewrite:** the calibrated engine (conformal + MMD/energy + permutation +
+sequential control), storage, scheduler, and alerting all stay — these feed new
+signals/traffic into the *same* `DriftReport`/alert pipeline. (~70% of existing
+work is reused.) Recommended order is **②, then ③, then ①** (cheap-and-broadening
+first, the differentiator last).
+
+- [ ] **⭐ ② Multi-signal detectors (do first — cheap, biggest credibility jump).**
+      Embedding shift is one axis; "drift monitoring" only becomes *true* with
+      more. Add small, pluggable detectors that each emit into the existing
+      severity/alert path (~a day each): output **format/schema validity**,
+      **refusal rate**, **latency**, **output-length distribution**,
+      **sentiment/tone**. No engine change — each is a new signal source feeding
+      the same report.
+- [ ] **⭐ ③ Structured expectation/assertion checks.** Extend the probe's existing
+      `expected_contains` to structured per-prompt assertions (JSON shape, regex,
+      value bounds). Small; turns probes into contract tests as well as drift
+      canaries.
+- [ ] **⭐ ① Production-traffic sampling (the real differentiator — biggest build).**
+      Today drift is only seen on a handful of synthetic probes. Mirror/sample
+      **real requests** and run the same drift test on them. This is the one
+      genuinely new subsystem — an ingestion path + PII/privacy handling — and it
+      is what converts "synthetic canary" into actual *monitoring*. Still plugs
+      into the existing pipeline; biggest effort, highest payoff.
+
+> These are a **premium tier**, gated behind the v1 honesty fixes (Honesty
+> section) and the NEXT exchangeability-hardening items (P2). Do not start them
+> before the core dashboard loop (P1) is usable.
+
+---
 
 ## Honesty / scoping (fix the *copy*, not just the code)
 
@@ -300,3 +397,25 @@ that gate was replaced.
   `C:\Users\notk\.cargo\bin` (cargo/rustc 1.96.0). The git pre-commit hook runs
   `cargo fmt --check` + `clippy -D warnings` (+ `svelte-check` when `web/` is
   staged), so commits require that on PATH.
+
+  ## Last audit
+
+  6. model_version "first wins" hides within-run disagreement (minor — I added this)
+probe_runner.rs records the first reported version across samples/prompts. If a provider serves a partial rollout (different versions mid-run), the discrepancy is silently dropped — ironic for a model-version detector. A tracing::debug! (or warn) when a later sample reports a different version would close it.
+
+Magic strings
+7. Provider/output wire literals (low — wire-contract constants, arguably acceptable inline but technically magic)
+
+Role "user": openai.rs:234, azure.rs:286, anthropic.rs:162
+Anthropic block_type == "text" / stop_reason == "refusal" / "end_turn": anthropic.rs:200-210
+Schemes "http"/"https": alert.rs:322
+Webhook payload keys "event_id"/"rule_id"/"drift_level"/"fired_at": alert.rs:255-259 — this is your outbound contract; worth a typed payload struct so it can't silently drift.
+8. Test-fixture duplication (low)
+timeout_secs: 30 plus the full AppConfig/AppState literal is copy-pasted across 5 route test modules (runs/probes/alerts/baselines/vault). A shared test_state() helper would remove ~5 duplicates and the magic 30.
+
+Worth verifying (not clearly wrong)
+9. SSRF allowlist edge ranges — is_disallowed_ip covers loopback/RFC-1918/link-local/metadata well, but not 100.64.0.0/10 (CGNAT) or 198.18.0.0/15 (benchmark). Realistic targets are covered; these are completeness gaps.
+
+10. Cache-busting field efficacy (I added this session) — the varying user field defeats exact-request/proxy caches and store:false prevents storage, but user does not key OpenAI's prompt cache (that's the prompt prefix / prompt_cache_key). For short probe prompts prompt-caching doesn't apply and sampled outputs still vary, so it's defensible — but if defeating prompt caching is the explicit goal, prompt_cache_key is the precise knob. Worth confirming against the current API.
+
+//end last audit

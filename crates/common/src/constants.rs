@@ -8,6 +8,8 @@
 //! - [`credential`] — vault keys for secrets that are not provider API keys.
 //! - [`method`] — drift-assessment method tags recorded in `DriftReport::method`.
 //! - [`table`] — `redb` table names (the persistence key namespace).
+//! - [`server`] — daemon HTTP-server limits/defaults (timeouts, body cap, rate
+//!   limit, CORS default).
 //! - [`header`] — HTTP header names for the daemon's own API.
 //! - [`defaults`] — provider model IDs, base URLs, embedding dims, timeouts.
 //! - [`drift`] — numeric floors/tolerances shared by the drift algorithms.
@@ -90,6 +92,27 @@ pub mod table {
     pub const ALERT_SPEND: &str = "alert_spend";
 }
 
+/// HTTP server limits and defaults for the daemon's own API.
+#[allow(clippy::doc_markdown)]
+pub mod server {
+    /// Default request timeout (seconds) when `[server] timeout_secs` is unset.
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+    /// Default allowed CORS origin (the Vite dev server) when `[server]
+    /// cors_origin` is unset. `"*"` allows all origins (not recommended for
+    /// production).
+    pub const DEFAULT_CORS_ORIGIN: &str = "http://localhost:5173";
+    /// Maximum accepted request body. Probe/alert payloads are small; anything
+    /// larger is rejected with `413 Payload Too Large` to bound memory use.
+    pub const MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+    /// Per-client rate-limit bucket capacity (keyed by peer IP): the bucket
+    /// holds up to this many requests, refilling one token every
+    /// [`RATE_LIMIT_REPLENISH_SECS`] seconds — throttling credential
+    /// brute-forcing while allowing a steady stream.
+    pub const RATE_LIMIT_BURST: u32 = 100;
+    /// Token refill period (seconds) for the per-client rate limiter.
+    pub const RATE_LIMIT_REPLENISH_SECS: u64 = 1;
+}
+
 /// HTTP header names for the daemon's own API.
 pub mod header {
     /// API-key auth header accepted as an alternative to
@@ -110,8 +133,14 @@ pub mod defaults {
 
     /// OpenAI defaults.
     pub mod openai {
-        /// Default chat model.
-        pub const MODEL: &str = "gpt-5.4";
+        /// Current GA chat models, most-capable first — the menu the dashboard
+        /// offers and the set tests draw from (June 2026: `gpt-5.5` flagship,
+        /// `gpt-5.4`, `gpt-5.4-mini`). Models date over time; update the list
+        /// here.
+        pub const MODELS: [&str; 3] = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+        /// Default chat model — the balanced `gpt-5.4` (second of [`MODELS`]),
+        /// not the flagship, since probes call it repeatedly on a schedule.
+        pub const MODEL: &str = MODELS[1];
         /// Default embedding model (1536-dimensional).
         pub const EMBEDDING_MODEL: &str = "text-embedding-3-small";
         /// Native output dimension of [`EMBEDDING_MODEL`].
@@ -124,11 +153,21 @@ pub mod defaults {
 
     /// Anthropic defaults.
     pub mod anthropic {
-        /// Default chat model.
-        pub const MODEL: &str = "claude-sonnet-4-6";
+        /// Current Claude 4.X family chat models, most-capable first — the menu
+        /// the dashboard offers and the set tests draw from (June 2026: Opus
+        /// 4.8 / Sonnet 4.6 / Haiku 4.5; Sonnet 4 & Opus 4 retired 2026-06-15).
+        /// Model IDs are dateless pinned snapshots from the 4.6 generation on.
+        /// Update the list here as the family advances.
+        pub const MODELS: [&str; 3] = ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"];
+        /// Default chat model — the balanced `claude-sonnet-4-6` (second of
+        /// [`MODELS`]), not the flagship, since probes call it on a schedule.
+        pub const MODEL: &str = MODELS[1];
         /// API base URL.
         pub const BASE_URL: &str = "https://api.anthropic.com";
-        /// Messages API version header value.
+        /// Messages API version header value. This is a stable API *contract*
+        /// identifier (not a freshness date): `2023-06-01` is the value current
+        /// Claude models still require in 2026 — bump only when Anthropic
+        /// publishes a new versioned contract.
         pub const API_VERSION: &str = "2023-06-01";
         /// Per-request HTTP timeout (seconds).
         pub const TIMEOUT_SECS: u64 = 30;
@@ -140,8 +179,13 @@ pub mod defaults {
 
     /// Ollama (local) defaults.
     pub mod ollama {
-        /// Default chat model.
-        pub const MODEL: &str = "llama3";
+        /// Current local chat models, most-preferred first — the menu the
+        /// dashboard offers and the set tests draw from (June 2026 Ollama pull
+        /// tags: `llama4`, `qwen3`, `gemma4`). The default [`MODEL`] is the
+        /// first entry. Update the list here as the library advances.
+        pub const MODELS: [&str; 3] = ["llama4", "qwen3", "gemma4"];
+        /// Default chat model (first of [`MODELS`]).
+        pub const MODEL: &str = MODELS[0];
         /// API base URL.
         pub const BASE_URL: &str = "http://localhost:11434";
         /// Nominal embedding dimension (model-dependent; a conservative default
@@ -157,8 +201,21 @@ pub mod defaults {
     /// deployment-specific and have no universal default — they are supplied via
     /// `[providers.azure]` config and the per-probe spec.
     pub mod azure {
-        /// Default `api-version` query parameter for the Azure OpenAI REST API.
-        pub const API_VERSION: &str = "2024-10-21";
+        /// Known underlying chat models behind Azure deployments — Azure hosts
+        /// the same OpenAI models, addressed by a user-named *deployment* (so
+        /// there is no default model name). The API still reports the underlying
+        /// model identity in each response; these are the values that field
+        /// carries. Sourced from [`super::openai::MODELS`] so the two never
+        /// diverge.
+        pub const MODELS: [&str; 3] = super::openai::MODELS;
+        /// `api-version` token for the Azure OpenAI **v1 API** (the current
+        /// generation, GA since Aug 2025). The v1 surface replaced the old
+        /// monthly *dated* `api-version` parameters with a single stable
+        /// `preview` channel that always exposes the latest features, so there
+        /// is no year to keep current here. Used on the `/openai/v1/{op}`
+        /// routes (the deployment is passed as `model` in the request body).
+        /// Operator-overridable via `[providers.azure]` to pin a dated version.
+        pub const API_VERSION: &str = "preview";
         /// Native output dimension of the default embedding deployment
         /// (`text-embedding-3-small`). Override to match your deployment.
         pub const EMBEDDING_DIM: usize = 1536;
@@ -231,13 +288,26 @@ pub mod alerts {
 
     /// Default SMTP submission port (RFC 6409 STARTTLS submission).
     pub const SMTP_PORT: u16 = 587;
+
+    /// HTTP timeout (seconds) for outbound alert/webhook delivery — short, so a
+    /// slow or hung receiver cannot stall the alert path.
+    pub const WEBHOOK_TIMEOUT_SECS: u64 = 10;
 }
 
-/// Scheduler defaults.
+/// Scheduler / probe-execution tuning.
 pub mod scheduler {
+    use std::time::Duration;
+
     /// Default cap on the number of probe runs executing concurrently across all
     /// probes. Each run may itself fan out up to the per-run prompt concurrency,
     /// so this bounds the total outbound load a fleet of probes puts on one
     /// provider (avoiding a restart/​reconcile stampede). Must be ≥ 1.
     pub const MAX_CONCURRENT_RUNS: usize = 8;
+
+    /// How often the scheduler re-reads the probe set from the store to pick up
+    /// probes added, edited, or deleted via the API/CLI after startup.
+    pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+
+    /// Maximum number of prompts a single probe run executes concurrently.
+    pub const PROBE_CONCURRENCY: usize = 4;
 }

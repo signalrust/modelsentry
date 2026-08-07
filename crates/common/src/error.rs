@@ -1,7 +1,22 @@
 #[derive(Debug, thiserror::Error)]
 pub enum ModelSentryError {
+    /// A provider returned a 200 response the adapter could not turn into a
+    /// usable result for a *semantic* reason (no choices, a safety refusal, an
+    /// unsupported capability such as Anthropic embeddings). Distinct from a
+    /// transport failure ([`Self::ProviderTransport`]) or a decode failure
+    /// ([`Self::ProviderDecode`]).
     #[error("provider error: {message}")]
     Provider { message: String },
+
+    /// The HTTP request to the provider could not be completed (DNS, connect,
+    /// TLS, timeout) — no usable response was received.
+    #[error("provider request failed: {message}")]
+    ProviderTransport { message: String },
+
+    /// The provider returned a response whose body could not be deserialized
+    /// into the expected shape.
+    #[error("failed to decode provider response: {message}")]
+    ProviderDecode { message: String },
 
     #[error("provider returned HTTP {status}: {body}")]
     ProviderHttp { status: u16, body: String },
@@ -54,6 +69,18 @@ pub enum ModelSentryError {
 
     #[error("configuration error: {message}")]
     Config { message: String },
+
+    /// A drift-computation precondition failed on the data itself (mismatched
+    /// prompt counts, no usable prompt, too few samples for a two-sample test,
+    /// non-finite embedding values) — a data/validation error, not a provider or
+    /// transport fault.
+    #[error("drift computation error: {message}")]
+    Drift { message: String },
+
+    /// An internal invariant failed (e.g. a concurrency primitive was closed).
+    /// Not attributable to the provider or the caller's input.
+    #[error("internal error: {message}")]
+    Internal { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, ModelSentryError>;
@@ -70,6 +97,32 @@ mod tests {
         let display = err.to_string();
         assert!(display.contains("provider error"));
         assert!(display.contains("connection refused"));
+    }
+
+    #[test]
+    fn provider_failure_modes_are_distinct_matchable_variants() {
+        let transport = ModelSentryError::ProviderTransport {
+            message: "connection refused".into(),
+        };
+        let decode = ModelSentryError::ProviderDecode {
+            message: "expected value at line 1".into(),
+        };
+        let drift = ModelSentryError::Drift {
+            message: "prompt count mismatch".into(),
+        };
+        let internal = ModelSentryError::Internal {
+            message: "semaphore closed".into(),
+        };
+        assert!(transport.to_string().contains("provider request failed"));
+        assert!(decode.to_string().contains("decode provider response"));
+        assert!(drift.to_string().contains("drift computation error"));
+        assert!(internal.to_string().contains("internal error"));
+        // The point of the split: each failure mode is its own matchable variant.
+        assert!(matches!(
+            transport,
+            ModelSentryError::ProviderTransport { .. }
+        ));
+        assert!(!matches!(transport, ModelSentryError::Provider { .. }));
     }
 
     #[test]
