@@ -1,8 +1,23 @@
 # ModelSentry
 
-**Self-hosted LLM drift detection.** ModelSentry continuously probes your LLM endpoints, captures statistical baselines, and fires alerts the moment model behaviour shifts — all without sending data to a third-party service.
+Your prompts don't change. The provider swaps a model version, patches a
+jailbreak, reroutes you to a distilled variant, or changes a system prompt
+upstream — and the API keeps returning `200`. Nothing errors. You find out
+from users, not logs.
+
+ModelSentry watches for that. It runs a fixed probe corpus against your LLM
+endpoint on a schedule, embeds the completions, and runs a calibrated
+nonparametric two-sample test (conformal prediction + MMD/energy-distance
+permutation testing) against a stored baseline. Alerts fire on a p-value
+threshold you choose, not a hand-tuned similarity score — `target_fpr = 0.01`
+means what it says. Runs self-hosted, as a single Rust binary plus an
+embedded database; nothing leaves your infrastructure.
 
 [![CI](https://github.com/signalrust/modelsentry/actions/workflows/ci.yml/badge.svg)](https://github.com/signalrust/modelsentry/actions/workflows/ci.yml)
+
+See [`docs/DRIFT_DETECTION_METHODOLOGY.md`](docs/DRIFT_DETECTION_METHODOLOGY.md)
+for the full statistics, or [§ Limitations](#limitations) for what this does
+*not* catch before you rely on it.
 
 ---
 
@@ -147,7 +162,7 @@ repeat alerts for a rule (noise), and `[alerts.sequential]` (`window_secs`,
 `alpha_budget`) applies **alpha-spending** to bound the *expected number of false
 alarms per rule per rolling window* (error rate) — the formal sequential
 guarantee. The latter is off by default; see
-[methodology §11](docs/DRIFT_DETECTION_METHODOLOGY.md#11-sequential).
+[methodology §8](docs/DRIFT_DETECTION_METHODOLOGY.md#8-sequential).
 
 ---
 
@@ -193,6 +208,52 @@ Configure the single knob — and a richer baseline for more power — under
 `[alerts]` (`target_fpr`, `baseline_capture_runs`, `cooldown_secs`, and the
 optional `[alerts.sequential]` alpha-spending budget); see
 [`docs/THRESHOLD_TUNING.md`](docs/THRESHOLD_TUNING.md).
+
+---
+
+## Example Probes
+
+The Quickstart above uses trivial prompts to get you running fast. In
+practice, a probe is only as good a canary as its prompts are sensitive to
+the kind of regression you care about — a prompt with one defensible answer
+that's cheap to phrase differently is a much better drift signal than one
+with many equally-valid phrasings, since the embedding cloud is tighter and
+a real shift stands out sooner. Precise, narrow-domain questions with a
+single defensible current answer make good canaries for exactly that reason:
+a version swap, a distillation, or a knowledge cutoff regression shows up as
+a detectable shift, not noise. Five examples, with what a regression would
+look like:
+
+| Domain | Prompt | Why it drifts |
+|---|---|---|
+| CS — computability | "Is the equivalence problem for two arbitrary context-free grammars decidable?" | Correct answer is *no* (undecidable — unlike the regular-language case, which *is* decidable). A model that starts hedging into "it depends" or wrongly claims decidability is a real regression, not phrasing noise. |
+| CS — complexity theory | "Is graph isomorphism known to be NP-complete, known to be in P, or open — and what's the best known worst-case algorithm?" | Correct answer names Babai's 2015 quasipolynomial algorithm. A model reverting to pre-2015 framing ("no subexponential algorithm known") signals a stale or downgraded model behind the same endpoint. |
+| CS — approximation algorithms | "What's the best known polynomial-time approximation ratio for metric TSP, versus Christofides' classical 3/2 bound?" | Correct answer cites the Karlin–Klein–Oveis Gharan result (2020/2021), the first improvement on 3/2 in over 40 years. A stale answer just repeats "3/2, unimproved." |
+| Mathematics — combinatorics | "What's the best known upper-bound exponent for the cap set problem, following the Croot–Lev–Pach / Ellenberg–Gijswijt polynomial method?" | Correct answer is the 2016 breakthrough bound (`O(2.756ⁿ)`, down from the trivial `~3ⁿ`). A model that can't name the polynomial method or the improved base is a checkable knowledge regression. |
+| Astrophysics — cosmology | "What are the current SH0ES and Planck measurements of the Hubble constant H₀, and how large is the tension between them?" | Correct answer: ≈73 km/s/Mpc (SH0ES, local distance ladder) vs. ≈67 km/s/Mpc (Planck, CMB), tension around 5σ. An actively refined, precise, checkable pair of numbers — a good freshness canary in a fast-moving field. |
+
+Each of these pairs naturally with `expected_contains` (e.g. `"Babai"`,
+`"undecidable"`, `"Karlin"`, `"Ellenberg"`, `"73"`) so a hard factual
+regression fails immediately, while the embedding-drift test still catches
+subtler shifts in how the answer is phrased, hedged, or reasoned through.
+
+---
+
+## Limitations
+
+- **Detects semantic-embedding drift on synthetic probes you configure —
+  nothing more.** Format/JSON-validity breakage, latency regressions, tone
+  shifts, refusals, and meaning-preserving safety regressions are currently
+  invisible to it.
+- **Synthetic canary probes are not production monitoring.** You only see
+  drift on the prompts you configured, not on real traffic.
+- **The calibrated test assumes baseline/run exchangeability.** Provider
+  version changes and exact-request caching are now detected/mitigated
+  (model-version pinning, cache-busting nonces); time-of-day effects and
+  autocorrelation are not — treat drift near a deploy or traffic-pattern
+  change with extra scrutiny. See
+  [`docs/DRIFT_DETECTION_METHODOLOGY.md`](docs/DRIFT_DETECTION_METHODOLOGY.md)
+  for the full statistical assumptions.
 
 ---
 
@@ -264,7 +325,7 @@ Criterion HTML reports are written to `target/criterion/`.
 ```bash
 cd web
 npm ci
-npm run dev      # http://localhost:5173 (proxies /api to :7740)
+npm run dev      # http://localhost:5173 — calls :7740 directly (CORS), no proxy
 ```
 
 ### Frontend Checks

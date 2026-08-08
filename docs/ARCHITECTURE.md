@@ -8,6 +8,11 @@
 
 ModelSentry is a self-hosted daemon that fingerprints LLM API behavior by periodically sending a fixed probe corpus to a configured endpoint, embedding each model **completion**, and comparing the resulting per-prompt output-embedding clouds against a trusted baseline with a **calibrated nonparametric two-sample test**. It alerts when a run's calibrated combined p-value falls below a configured **target false-positive rate** — so the alert threshold has a precise statistical meaning instead of being a hand-tuned magic number. See [`DRIFT_DETECTION_METHODOLOGY.md`](DRIFT_DETECTION_METHODOLOGY.md) for the full theory.
 
+**Scope.** This detects semantic-embedding drift on the configured synthetic
+probe corpus only — not production traffic, and not format/latency/tone/
+refusal shifts. See the [README § Limitations](../README.md#limitations) for
+the full caveat list, including the conformal exchangeability assumption.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         ModelSentry Daemon                           │

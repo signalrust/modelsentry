@@ -12,3 +12,6 @@ web/build/
 
 # Claude Code local (personal) settings
 .claude/settings.local.json
+
+# Local-only quality scorecard — subjective audit notes, not for distribution
+docs/SCORECARD.md

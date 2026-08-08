@@ -54,7 +54,7 @@ false alarms a month with no drift. Two optional controls bound this:
   a budget buys ≈ `alpha_budget / target_fpr` full-sensitivity looks per window,
   after which the rule goes quiet until older spends age out. Size it against the
   probe's cadence. See
-  [methodology §11](DRIFT_DETECTION_METHODOLOGY.md#11-sequential).
+  [methodology §8](DRIFT_DETECTION_METHODOLOGY.md#8-sequential).
 
 ---
 
