@@ -18,13 +18,18 @@ Implementation: `crates/core/src/drift/{twosample,assessment}.rs`,
 
 ## Contents
 
-1. [Setup](#1-setup) · 2. [Pooled two-sample statistic](#2-pooled) ·
-3. [Per-prompt conformal attribution](#3-conformal) ·
-4. [Aggregation: stratified permutation gate](#4-gate) ·
-5. [Effect size](#5-effect-size) · 6. [Severity mapping](#6-severity) ·
-7. [Power and baseline sizing](#7-power) ·
-8. [Sequential control](#8-sequential) · 9. [Pipeline](#9-pipeline) ·
-10. [Exchangeability status](#10-exchangeability) · [References](#references)
+1. [Setup](#1-setup)
+2. [Pooled two-sample statistic](#2-pooled)
+3. [Per-prompt conformal attribution](#3-conformal)
+4. [Aggregation: stratified permutation gate](#4-gate)
+5. [Effect size](#5-effect-size)
+6. [Severity mapping](#6-severity)
+7. [Power and baseline sizing](#7-power)
+8. [Sequential control](#8-sequential)
+9. [Pipeline](#9-pipeline)
+10. [Exchangeability status](#10-exchangeability)
+
+[References](#references)
 
 ---
 
